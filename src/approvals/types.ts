@@ -1,3 +1,5 @@
+import type { z } from 'zod';
+
 export type WriteTool = 'issue_refund' | 'update_order_status' | 'create_credit_note' | 'add_customer_note';
 export type Role = 'reader' | 'operator' | 'admin';
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'executed' | 'failed';
@@ -30,7 +32,8 @@ export type RequestWriteResult =
   | { kind: 'pending'; approvalId: string; summary: string; approval: Approval }
   | { kind: 'duplicate'; approvalId: string; status: ApprovalStatus; result: unknown }
   | { kind: 'conflict'; approvalId: string }
-  | { kind: 'denied'; reason: string };
+  | { kind: 'denied'; reason: string }
+  | { kind: 'invalid_args'; issues: z.core.$ZodIssue[] };
 
 export type ResolveResult =
   | { kind: 'resolved'; approvalId: string; status: 'approved' | 'denied' }
@@ -50,6 +53,8 @@ export type HandlerOutcome = { ok: true; result: Record<string, unknown> } | { o
 
 /** One entry per write tool. execute runs inside the claiming transaction. */
 export type ToolHandler = {
+  /** Validated before hashing; the parsed output is what gets hashed and stored. */
+  schema: z.ZodType<Record<string, unknown>>;
   summarize(sql: Sql, args: Record<string, unknown>): Promise<string>;
   execute(tx: Sql, approval: Approval): Promise<HandlerOutcome>;
 };

@@ -28,7 +28,13 @@ export async function requestWrite(
     await writeAudit(db, { ...base, outcome: 'denied', errorCode: reason });
     return { kind: 'denied', reason };
   }
-  const hash = argsHash(input.args);
+  const parsed = handler.schema.safeParse(input.args);
+  if (!parsed.success) {
+    await writeAudit(db, { ...base, outcome: 'error', errorCode: 'invalid_args' });
+    return { kind: 'invalid_args', issues: parsed.error.issues };
+  }
+  const args = parsed.data;
+  const hash = argsHash(args);
 
   const classify = async (row: Approval): Promise<RequestWriteResult> => {
     if (row.args_hash !== hash) {
@@ -38,6 +44,10 @@ export async function requestWrite(
     if (row.status === 'pending' || row.status === 'approved') {
       await writeAudit(db, { ...base, outcome: 'pending_approval', approvalId: row.id });
       return { kind: 'pending', approvalId: row.id, summary: row.summary, approval: row };
+    }
+    if (row.status === 'denied') {
+      await writeAudit(db, { ...base, outcome: 'denied', approvalId: row.id, errorCode: 'previously_denied' });
+      return { kind: 'denied', reason: 'previously_denied' };
     }
     await writeAudit(db, { ...base, outcome: 'duplicate', approvalId: row.id });
     return { kind: 'duplicate', approvalId: row.id, status: row.status, result: row.result };
@@ -49,12 +59,12 @@ export async function requestWrite(
   const existing = await find();
   if (existing) return classify(existing);
 
-  const summary = await handler.summarize(db, input.args);
+  const summary = await handler.summarize(db, args);
   const inserted = await db.query<Approval>(
     `insert into approvals (id, tool, idempotency_key, args_hash, arguments, summary, requested_by)
      values ($1,$2,$3,$4,$5,$6,$7)
      on conflict (tool, idempotency_key) do nothing returning *`,
-    [randomUUID(), input.tool, input.idempotencyKey, hash, JSON.stringify(input.args), summary, input.actor],
+    [randomUUID(), input.tool, input.idempotencyKey, hash, JSON.stringify(args), summary, input.actor],
   );
   if (inserted.rows[0]) {
     await writeAudit(db, { ...base, outcome: 'pending_approval', approvalId: inserted.rows[0].id });
