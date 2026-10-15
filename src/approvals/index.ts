@@ -120,14 +120,24 @@ export async function executeApproval(
     await writeAudit(db, { actor: caller.actor, role: caller.role, tool: 'execute_approval', args: { approvalId }, outcome: 'denied', startedAt, correlationId, errorCode: 'role_not_permitted' });
     return { kind: 'denied', reason: 'role_not_permitted' };
   }
-  const out = await db.transaction(async (tx): Promise<{ res: ExecuteResult; row?: Approval }> => {
+  return db.transaction(async (tx): Promise<ExecuteResult> => {
+    // Audit is written through tx so the business write and its audit row commit or roll back together.
+    const finish = async (r: ExecuteResult, row?: Approval): Promise<ExecuteResult> => {
+      const outcome = r.kind === 'executed' ? 'ok' : r.kind === 'duplicate' ? 'duplicate' : 'error';
+      const errorCode = r.kind === 'failed' ? r.error : r.kind === 'not_approved' ? `status_${r.status}` : r.kind === 'not_found' ? 'not_found' : null;
+      await writeAudit(tx, {
+        actor: caller.actor, role: caller.role, tool: row?.tool ?? 'execute_approval', args: row?.arguments ?? { approvalId },
+        outcome, approvalId: row ? approvalId : null, idempotencyKey: row?.idempotency_key ?? null, startedAt, correlationId, errorCode,
+      });
+      return r;
+    };
     // Row lock serializes concurrent executors; the loser sees a non-approved status afterwards.
     const locked = (await tx.query<Approval>(`select * from approvals where id = $1 and status = 'approved' for update`, [approvalId])).rows[0];
     if (!locked) {
       const cur = await getApproval(tx, approvalId);
-      if (!cur) return { res: { kind: 'not_found' } };
-      if (cur.status === 'executed' || cur.status === 'failed') return { res: { kind: 'duplicate', approvalId, status: cur.status, result: cur.result }, row: cur };
-      return { res: { kind: 'not_approved', status: cur.status }, row: cur };
+      if (!cur) return finish({ kind: 'not_found' });
+      if (cur.status === 'executed' || cur.status === 'failed') return finish({ kind: 'duplicate', approvalId, status: cur.status, result: cur.result }, cur);
+      return finish({ kind: 'not_approved', status: cur.status }, cur);
     }
     const handler = handlers[locked.tool];
     await tx.query('savepoint exec_tool');
@@ -145,15 +155,7 @@ export async function executeApproval(
     );
     if (!claimed.rows[0]) throw new Error('approval claim lost despite row lock');
     return outcome.ok
-      ? { res: { kind: 'executed', approvalId, result }, row: claimed.rows[0] }
-      : { res: { kind: 'failed', approvalId, error: outcome.error }, row: claimed.rows[0] };
+      ? finish({ kind: 'executed', approvalId, result }, claimed.rows[0])
+      : finish({ kind: 'failed', approvalId, error: outcome.error }, claimed.rows[0]);
   });
-  const r = out.res;
-  const outcome = r.kind === 'executed' ? 'ok' : r.kind === 'duplicate' ? 'duplicate' : 'error';
-  const errorCode = r.kind === 'failed' ? r.error : r.kind === 'not_approved' ? `status_${r.status}` : r.kind === 'not_found' ? 'not_found' : null;
-  await writeAudit(db, {
-    actor: caller.actor, role: caller.role, tool: out.row?.tool ?? 'execute_approval', args: out.row?.arguments ?? { approvalId },
-    outcome, approvalId: out.row ? approvalId : null, idempotencyKey: out.row?.idempotency_key ?? null, startedAt, correlationId, errorCode,
-  });
-  return r;
 }
