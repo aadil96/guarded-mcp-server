@@ -30,9 +30,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
-      - run: pnpm test
       - name: Migrate on real Postgres 16
         run: pnpm db:migrate
+      - name: Tests on real Postgres 16 (fresh database per test file)
+        run: pnpm test
       - name: Seed twice (must be idempotent)
         run: pnpm seed && pnpm seed
       - name: Verify row counts after double seed
