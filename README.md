@@ -6,7 +6,24 @@ An MCP server for a **fake** wholesale business database (Meridian Supply Co.). 
 
 ## Status
 
-Work in progress. Right now the repo has the scaffold plus the database schema and seed. No tools are wired up yet.
+Work in progress. The read tools run over stdio (`pnpm start`). Write tools and approvals are not built yet.
+
+## Tools
+
+All read tools are annotated `readOnlyHint: true`. Annotations are hints: clients must not trust them from servers they don't trust. Every call writes one `audit_events` row.
+
+| Tool | What it does | Limits |
+|---|---|---|
+| `list_customers` | Customer list, oldest first | max 50 / page |
+| `get_customer` | One customer by id | |
+| `list_orders` | Orders, filter by `customer_id` and/or `status` | max 50 |
+| `get_order` | One order with its line items | |
+| `list_invoices` | Invoices, filter by `customer_id` and/or `status` | max 50 |
+| `get_invoice` | One invoice by id | |
+| `search_orders` | Text search on order number or customer name | parameterized, wildcards matched literally, max 50 |
+| `list_pending_approvals` | Write requests waiting for a human | max 50 |
+
+`pnpm start` needs `DATABASE_URL`. `MCP_ACTOR` (default `local-dev`) and `MCP_ROLE` (`reader` or `operator`) set the audit identity. For a throwaway dev database, `MCP_DEV_PGLITE=1 pnpm start` uses seeded in-memory PGlite instead.
 
 ## Non-goals (v1)
 
