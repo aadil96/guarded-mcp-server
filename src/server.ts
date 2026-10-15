@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { ZodError } from 'zod';
 import { type Caller, callerFromEnv, writeAudit } from './audit/log.js';
+import { AuditTracker } from './audit/transport.js';
 import type { Db } from './db/types.js';
 import { readTools, ToolError } from './tools/read.js';
 
@@ -19,7 +20,7 @@ export async function callTool(db: Db, caller: Caller, name: keyof typeof readTo
     const data = await tool.run(db, tool.input.parse(args ?? {}) as any);
     result = { content: [{ type: 'text', text: JSON.stringify(data) }] };
   } catch (e) {
-    errorCode = e instanceof ToolError ? e.code : e instanceof ZodError ? 'invalid_arguments' : 'internal_error';
+    errorCode = e instanceof ToolError ? e.code : e instanceof ZodError ? 'invalid_args' : 'internal_error';
     const msg = e instanceof ToolError ? e.message : e instanceof ZodError ? 'invalid arguments' : 'internal error';
     if (errorCode === 'internal_error') console.error(`[${correlationId}]`, e);
     result = { content: [{ type: 'text', text: JSON.stringify({ error: errorCode, message: msg, correlationId }) }], isError: true };
@@ -31,14 +32,18 @@ export async function callTool(db: Db, caller: Caller, name: keyof typeof readTo
   return result;
 }
 
-export function createServer(db: Db, caller: Caller = callerFromEnv()) {
+/** Pass the same tracker to auditingTransport() so SDK-rejected calls are audited exactly once. */
+export function createServer(db: Db, caller: Caller = callerFromEnv(), tracker = new AuditTracker()) {
   const server = new McpServer({ name: 'guarded-mcp-server', version: '0.0.0' }, { capabilities: { tools: {} } });
   for (const [name, tool] of Object.entries(readTools) as [keyof typeof readTools, (typeof readTools)[keyof typeof readTools]][]) {
     server.registerTool(name, {
       description: tool.description,
       inputSchema: tool.input,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, (args: unknown) => callTool(db, caller, name, args));
+    }, (args: unknown, ctx: ServerContext) => {
+      tracker.markHandled(ctx.mcpReq.id);
+      return callTool(db, caller, name, args);
+    });
   }
   return server;
 }

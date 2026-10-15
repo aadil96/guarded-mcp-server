@@ -1,6 +1,7 @@
 import { InMemoryTransport, type JSONRPCMessage } from '@modelcontextprotocol/server';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { seed, seedId } from '../src/db/seed.js';
+import { AuditTracker, auditingTransport } from '../src/audit/transport.js';
 import { callTool, createServer } from '../src/server.js';
 import { escapeLike, type readTools } from '../src/tools/read.js';
 import { freshDb } from './helpers.js';
@@ -114,7 +115,7 @@ describe('audit', () => {
     expect(missing).toMatchObject({ isError: true, data: { error: 'not_found' } });
     expect(await auditCount()).toBe(before + 2);
     const bad = await call('get_invoice', { invoice_id: 'not-a-uuid' });
-    expect(bad.data.error).toBe('invalid_arguments');
+    expect(bad.data.error).toBe('invalid_args');
     expect(await auditCount()).toBe(before + 3);
     const rows = (await ctx.client.query<Record<string, unknown>>(
       'select actor, role, tool, arguments, outcome, duration_ms, correlation_id, error_code from audit_events order by created_at desc, tool limit 3',
@@ -132,7 +133,8 @@ describe('audit', () => {
 describe('MCP server over in-memory transport', () => {
   it('lists exactly the 8 read tools and serves get_order', async () => {
     const [clientT, serverT] = InMemoryTransport.createLinkedPair();
-    await createServer(ctx.db, caller).connect(serverT);
+    const tracker = new AuditTracker();
+    await createServer(ctx.db, caller, tracker).connect(auditingTransport(serverT, ctx.db, caller, tracker));
     const pending = new Map<number, (m: JSONRPCMessage) => void>();
     clientT.onmessage = (m) => { if ('id' in m && typeof m.id === 'number') pending.get(m.id)?.(m); };
     await clientT.start();
@@ -154,6 +156,25 @@ describe('MCP server over in-memory transport', () => {
     const content = r.result?.content as { text: string }[];
     expect(JSON.parse(content[0].text).orderNumber).toBe('ORD-0001');
     expect(await auditCount()).toBe(before + 1);
+
+    // Handler-level error (not found): still exactly one row, no double audit from the transport.
+    const nf = await rpc('tools/call', { name: 'get_order', arguments: { order_id: '00000000-0000-4000-8000-000000000000' } });
+    expect(nf.result?.isError).toBe(true);
+    expect(await auditCount()).toBe(before + 2);
+
+    // SDK rejects this against the strict zod schema before the handler runs: audited by the transport wrapper.
+    const bad = await rpc('tools/call', { name: 'get_invoice', arguments: { invoice_id: 'nope', password: 'hunter2' } });
+    expect(bad.result?.isError).toBe(true);
+    expect(JSON.stringify(bad.result)).toContain('Input validation error');
+    expect(await auditCount()).toBe(before + 3);
+    const row = (await ctx.client.query<Record<string, unknown>>(
+      `select tool, arguments, outcome, error_code, actor, role from audit_events where error_code = 'invalid_args' and tool = 'get_invoice' and arguments ? 'password'`,
+    )).rows;
+    expect(row).toEqual([{ tool: 'get_invoice', arguments: { invoice_id: 'nope', password: '[redacted]' }, outcome: 'error', error_code: 'invalid_args', actor: 'test-actor', role: 'reader' }]);
+
+    // tools/list is not a tool call and writes nothing.
+    await rpc('tools/list', {});
+    expect(await auditCount()).toBe(before + 3);
     await clientT.close();
   });
 });

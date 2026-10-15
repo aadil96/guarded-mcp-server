@@ -10,7 +10,7 @@ Work in progress. The read tools run over stdio (`pnpm start`). Write tools and 
 
 ## Tools
 
-All read tools are annotated `readOnlyHint: true`. Annotations are hints: clients must not trust them from servers they don't trust. Every call writes one `audit_events` row.
+All read tools are annotated `readOnlyHint: true`. Annotations are hints: clients must not trust them from servers they don't trust. Every `tools/call` writes one `audit_events` row, including calls the SDK rejects for invalid arguments (`error_code` `invalid_args`). The server's Postgres connections run `SET ROLE meridian_app`, so the least-privilege grants and append-only audit rules apply at runtime.
 
 | Tool | What it does | Limits |
 |---|---|---|
