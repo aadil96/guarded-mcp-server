@@ -1,0 +1,178 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { type Db, executeApproval, requestWrite, resolveApproval } from '../../src/approvals/index.js';
+import { seed, seedId } from '../../src/db/seed.js';
+import { approvalsDb } from '../approvals-db.js';
+import { freshDb } from '../helpers.js';
+
+let ctx: Awaited<ReturnType<typeof freshDb>>;
+let db: Db & { close(): Promise<void> };
+const op = { actor: 'op-1', role: 'operator' as const };
+const admin = { actor: 'admin-1', role: 'admin' as const };
+const reader = { actor: 'reader-1', role: 'reader' as const };
+
+const n = async (q: string, p: unknown[] = []) => (await ctx.client.query<{ n: number }>(`select count(*)::int n from ${q}`, p)).rows[0].n;
+const refundsFor = (inv: string) => n('refunds where invoice_id = $1', [inv]);
+const lastAudit = async () => (await ctx.client.query<{ outcome: string; arguments: unknown; duration_ms: number; correlation_id: string; approval_id: string | null; error_code: string | null }>(
+  'select * from audit_events order by created_at desc, ctid desc limit 1')).rows[0];
+async function invoice(i: number) {
+  const id = seedId(`invoice:${i}`);
+  const r = await ctx.client.query<{ total_paise: string; invoice_number: string }>('select total_paise, invoice_number from invoices where id = $1', [id]);
+  return { id, total: Number(r.rows[0].total_paise), number: r.rows[0].invoice_number };
+}
+const refundArgs = (invoice_id: string, amount_paise: number) => ({ invoice_id, amount_paise, reason: 'damaged in transit' });
+async function approved(key: string, args: Record<string, unknown>) {
+  const r = await requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: key });
+  if (r.kind !== 'pending') throw new Error(`expected pending, got ${r.kind}`);
+  const res = await resolveApproval(db, { ...admin, approvalId: r.approvalId, decision: 'approve' });
+  expect(res).toMatchObject({ kind: 'resolved', status: 'approved' });
+  return r.approvalId;
+}
+
+beforeAll(async () => {
+  ctx = await freshDb();
+  await seed(ctx.db);
+  db = approvalsDb(ctx.client, ctx.url);
+});
+afterAll(async () => { await db.close(); await ctx.client.close(); });
+
+describe('T1 idempotency', () => {
+  it('same key + same args: one approval, pending repeat, duplicate replay after execution, one refund', async () => {
+    const inv = await invoice(1);
+    const args = refundArgs(inv.id, 100);
+    const a = await requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 't1-same' });
+    expect(a.kind).toBe('pending');
+    if (a.kind !== 'pending') return;
+    expect(a.summary).toBe(`Refund ₹1.00 on ${inv.number}`);
+    expect((await lastAudit()).outcome).toBe('pending_approval');
+    const b = await requestWrite(db, { ...op, tool: 'issue_refund', args: { reason: args.reason, amount_paise: 100, invoice_id: inv.id }, idempotencyKey: 't1-same' });
+    expect(b).toMatchObject({ kind: 'pending', approvalId: a.approvalId });
+    expect(await n(`approvals where idempotency_key = 't1-same'`)).toBe(1);
+    await resolveApproval(db, { ...admin, approvalId: a.approvalId, decision: 'approve' });
+    const ex = await executeApproval(db, a.approvalId, admin);
+    expect(ex.kind).toBe('executed');
+    expect((await lastAudit()).outcome).toBe('ok');
+    const c = await requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 't1-same' });
+    expect(c).toMatchObject({ kind: 'duplicate', approvalId: a.approvalId, status: 'executed' });
+    if (c.kind === 'duplicate' && ex.kind === 'executed') expect(c.result).toEqual(ex.result);
+    expect((await lastAudit()).outcome).toBe('duplicate');
+    expect(await refundsFor(inv.id)).toBe(1);
+  });
+
+  it('same key + different args: conflict, zero changes', async () => {
+    const inv = await invoice(2);
+    await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 100), idempotencyKey: 't1-conf' });
+    const before = await ctx.client.query('select * from approvals order by id');
+    const refundsBefore = await n('refunds');
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 999), idempotencyKey: 't1-conf' });
+    expect(r.kind).toBe('conflict');
+    expect((await ctx.client.query('select * from approvals order by id')).rows).toEqual(before.rows);
+    expect(await n('refunds')).toBe(refundsBefore);
+    expect((await lastAudit()).outcome).toBe('conflict');
+  });
+
+  it('concurrent requestWrite with one key creates one approval', async () => {
+    const inv = await invoice(3);
+    const rs = await Promise.all([1, 2, 3].map(() => requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 100), idempotencyKey: 't1-race' })));
+    expect(rs.every((r) => r.kind === 'pending')).toBe(true);
+    expect(new Set(rs.map((r) => (r.kind === 'pending' ? r.approvalId : '')))).toHaveProperty('size', 1);
+    expect(await n(`approvals where idempotency_key = 't1-race'`)).toBe(1);
+  });
+
+  it('two concurrent executeApproval calls produce exactly one refund', async () => {
+    const inv = await invoice(4);
+    const id = await approved('t1-exec', refundArgs(inv.id, 100));
+    const [x, y] = await Promise.all([executeApproval(db, id, admin), executeApproval(db, id, admin)]);
+    expect([x.kind, y.kind].sort()).toEqual(['duplicate', 'executed']);
+    expect(await refundsFor(inv.id)).toBe(1);
+    expect(await n(`audit_events where approval_id = $1 and outcome = 'duplicate'`, [id])).toBe(1);
+  });
+});
+
+describe('T2 no approval, no write', () => {
+  it('requestWrite alone inserts no refund, and execute on a pending approval does nothing', async () => {
+    const inv = await invoice(5);
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 100), idempotencyKey: 't2-pending' });
+    if (r.kind !== 'pending') throw new Error('expected pending');
+    expect(await executeApproval(db, r.approvalId, admin)).toEqual({ kind: 'not_approved', status: 'pending' });
+    expect((await lastAudit()).outcome).toBe('error');
+    expect(await refundsFor(inv.id)).toBe(0);
+  });
+  it('denied approval inserts no refund and cannot be executed', async () => {
+    const inv = await invoice(6);
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 100), idempotencyKey: 't2-denied' });
+    if (r.kind !== 'pending') throw new Error('expected pending');
+    expect(await resolveApproval(db, { ...admin, approvalId: r.approvalId, decision: 'deny' })).toMatchObject({ kind: 'resolved', status: 'denied' });
+    expect(await executeApproval(db, r.approvalId, admin)).toEqual({ kind: 'not_approved', status: 'denied' });
+    expect(await resolveApproval(db, { ...admin, approvalId: r.approvalId, decision: 'approve' })).toEqual({ kind: 'invalid_state', status: 'denied' });
+    expect(await refundsFor(inv.id)).toBe(0);
+  });
+  it('reader role is denied and writes nothing but an audit row', async () => {
+    const before = await n('approvals');
+    const r = await requestWrite(db, { ...reader, tool: 'issue_refund', args: refundArgs(seedId('invoice:7'), 100), idempotencyKey: 't2-reader' });
+    expect(r).toEqual({ kind: 'denied', reason: 'role_not_permitted' });
+    expect(await n('approvals')).toBe(before);
+    const a = await lastAudit();
+    expect(a).toMatchObject({ outcome: 'denied', error_code: 'role_not_permitted' });
+    expect(a.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(a.correlation_id).toBeTruthy();
+  });
+});
+
+describe('T3 resolver binding', () => {
+  it('non-admin cannot approve', async () => {
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(seedId('invoice:8'), 100), idempotencyKey: 't3-nonadmin' });
+    if (r.kind !== 'pending') throw new Error('expected pending');
+    expect(await resolveApproval(db, { actor: 'op-2', role: 'operator', approvalId: r.approvalId, decision: 'approve' })).toEqual({ kind: 'denied', reason: 'admin_required' });
+    expect((await lastAudit()).outcome).toBe('denied');
+  });
+  it('requester cannot self-approve unless singleOperator', async () => {
+    const me = { actor: 'solo', role: 'admin' as const };
+    const r = await requestWrite(db, { ...me, tool: 'issue_refund', args: refundArgs(seedId('invoice:9'), 100), idempotencyKey: 't3-self' });
+    if (r.kind !== 'pending') throw new Error('expected pending');
+    expect(await resolveApproval(db, { ...me, approvalId: r.approvalId, decision: 'approve' })).toEqual({ kind: 'denied', reason: 'self_approval_forbidden' });
+    expect(await resolveApproval(db, { ...me, approvalId: r.approvalId, decision: 'approve', singleOperator: true })).toMatchObject({ kind: 'resolved', status: 'approved' });
+  });
+  it('knowing the approval id alone is not enough', async () => {
+    const inv = await invoice(10);
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 100), idempotencyKey: 't3-idonly' });
+    if (r.kind !== 'pending') throw new Error('expected pending');
+    expect((await resolveApproval(db, { ...reader, approvalId: r.approvalId, decision: 'approve' })).kind).toBe('denied');
+    expect((await executeApproval(db, r.approvalId, reader)).kind).toBe('denied');
+    expect((await executeApproval(db, r.approvalId, op)).kind).toBe('not_approved');
+    expect(await refundsFor(inv.id)).toBe(0);
+  });
+  it('amount over remaining -> failed, no refund', async () => {
+    const inv = await invoice(11);
+    const id = await approved('t3-over', refundArgs(inv.id, inv.total + 1));
+    expect(await executeApproval(db, id, admin)).toEqual({ kind: 'failed', approvalId: id, error: 'amount_exceeds_remaining' });
+    expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'amount_exceeds_remaining' });
+    expect((await ctx.client.query<{ status: string }>('select status from approvals where id = $1', [id])).rows[0].status).toBe('failed');
+    expect(await refundsFor(inv.id)).toBe(0);
+  });
+  it('two approved refunds that each fit but together exceed: second fails, total never exceeds invoice', async () => {
+    const inv = await invoice(12);
+    const part = Math.floor(inv.total * 0.6);
+    const a = await approved('t3-sum-a', refundArgs(inv.id, part));
+    const b = await approved('t3-sum-b', refundArgs(inv.id, part));
+    const rs = await Promise.all([executeApproval(db, a, admin), executeApproval(db, b, admin)]);
+    expect(rs.map((r) => r.kind).sort()).toEqual(['executed', 'failed']);
+    const sum = (await ctx.client.query<{ s: string }>('select coalesce(sum(amount_paise),0) s from refunds where invoice_id = $1', [inv.id])).rows[0].s;
+    expect(Number(sum)).toBe(part);
+    expect(Number(sum)).toBeLessThanOrEqual(inv.total);
+  });
+  it('full refund marks the invoice refunded', async () => {
+    const inv = await invoice(13);
+    const id = await approved('t3-full', refundArgs(inv.id, inv.total));
+    expect((await executeApproval(db, id, admin)).kind).toBe('executed');
+    expect((await ctx.client.query<{ status: string }>('select status from invoices where id = $1', [inv.id])).rows[0].status).toBe('refunded');
+  });
+});
+
+describe('audit', () => {
+  it('redacts sensitive args and records every outcome', async () => {
+    await requestWrite(db, { ...reader, tool: 'issue_refund', args: { ...refundArgs(seedId('invoice:14'), 1), customer_email: 'x@example.test' }, idempotencyKey: 't-audit' });
+    expect((await lastAudit()).arguments).toMatchObject({ customer_email: '[redacted]' });
+    const outcomes = (await ctx.client.query<{ outcome: string }>('select distinct outcome::text from audit_events')).rows.map((r) => r.outcome).sort();
+    expect(outcomes).toEqual(['conflict', 'denied', 'duplicate', 'error', 'ok', 'pending_approval']);
+  });
+});
