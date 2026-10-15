@@ -224,6 +224,10 @@ describe('argument validation and denied replay', () => {
 });
 
 describe('audit', () => {
+  it('runs as meridian_app, which cannot UPDATE audit_events', async () => {
+    expect((await db.query<{ u: string }>('select current_user u')).rows[0].u).toBe('meridian_app');
+    await expect(db.query(`update audit_events set outcome = 'ok'`)).rejects.toThrow(/permission denied|append-only/);
+  });
   it('redacts sensitive args and records every outcome', async () => {
     await requestWrite(db, { ...reader, tool: 'issue_refund', args: { ...refundArgs(seedId('invoice:14'), 1), customer_email: 'x@example.test' }, idempotencyKey: 't-audit' });
     expect((await lastAudit()).arguments).toMatchObject({ customer_email: '[redacted]' });

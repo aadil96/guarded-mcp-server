@@ -4,11 +4,14 @@ import type { TestClient } from './helpers.js';
 
 /**
  * Real Postgres (url set): a pg.Pool, so concurrent calls really run on separate connections.
+ * Both run as the least-privilege role meridian_app.
  * PGlite: one in-process connection, so transactions are serialized with a mutex.
  */
 export function approvalsDb(client: TestClient, url?: string): Db & { close(): Promise<void> } {
   if (url) {
     const pool = new pg.Pool({ connectionString: url, max: 4 });
+    // Least privilege: every approvals path runs as meridian_app, never as the owner.
+    pool.on('connect', (c) => { c.query('set role meridian_app').catch(() => undefined); });
     return {
       query: async (q, p) => ({ rows: (await pool.query(q, p)).rows }),
       async transaction(fn) {
@@ -29,7 +32,8 @@ export function approvalsDb(client: TestClient, url?: string): Db & { close(): P
       close: () => pool.end(),
     };
   }
-  let lock: Promise<unknown> = Promise.resolve();
+  const ready = client.query('set role meridian_app');
+  let lock: Promise<unknown> = ready;
   const serial = <T>(f: () => Promise<T>): Promise<T> => {
     const run = lock.then(f, f);
     lock = run.catch(() => undefined);
