@@ -1,0 +1,39 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meridian
+          POSTGRES_PASSWORD: meridian
+          POSTGRES_DB: meridian
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U meridian"
+          --health-interval 2s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://meridian:meridian@localhost:5432/meridian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Migrate on real Postgres 16
+        run: pnpm db:migrate
+      - name: Seed twice (must be idempotent)
+        run: pnpm seed && pnpm seed
+      - name: Verify row counts after double seed
+        run: pnpm verify:seed
