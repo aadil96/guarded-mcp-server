@@ -1,0 +1,41 @@
+{
+  "name": "guarded-mcp-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "seed": "tsx scripts/seed.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint .",
+    "verify:seed": "tsx scripts/verify-seed.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "drizzle-orm": "0.45.4",
+    "pg": "8.23.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@electric-sql/pglite": "0.5.10",
+    "@types/node": "26.6.5",
+    "@types/pg": "8.23.1",
+    "drizzle-kit": "0.31.11",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "packageManager": "pnpm@10.34.6",
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
