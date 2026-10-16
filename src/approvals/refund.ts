@@ -29,15 +29,17 @@ export const issueRefund: ToolHandler = {
     const inv = await tx.query<{ paid_paise: string | number }>('select paid_paise from invoices where id = $1 for update', [invoiceId]);
     if (!inv.rows[0]) return { ok: false, error: 'invoice_not_found' };
     // Cap is what the customer actually paid, not the invoice total.
-    const paid = Number(inv.rows[0].paid_paise);
+    // bigint end to end: paise sums can exceed Number.MAX_SAFE_INTEGER.
+    const paid = BigInt(inv.rows[0].paid_paise);
+    const amt = BigInt(amount);
     const prior = await tx.query<{ s: string | number }>('select coalesce(sum(amount_paise), 0) s from refunds where invoice_id = $1', [invoiceId]);
-    const remaining = paid - Number(prior.rows[0].s);
-    if (amount > remaining) return { ok: false, error: 'amount_exceeds_remaining' };
+    const remaining = paid - BigInt(prior.rows[0].s);
+    if (amt > remaining) return { ok: false, error: 'amount_exceeds_remaining' };
     const refundId = crypto.randomUUID();
     await tx.query('insert into refunds (id, invoice_id, approval_id, amount_paise, reason) values ($1,$2,$3,$4,$5)',
       [refundId, invoiceId, approval.id, amount, reason]);
-    const fully = amount === remaining; // all paid money refunded
+    const fully = amt === remaining; // all paid money refunded
     if (fully) await tx.query(`update invoices set status = 'refunded' where id = $1`, [invoiceId]);
-    return { ok: true, result: { refundId, invoiceId, amountPaise: amount, remainingPaise: remaining - amount, invoiceRefunded: fully } };
+    return { ok: true, result: { refundId, invoiceId, amountPaise: amount, remainingPaise: (remaining - amt).toString(), invoiceRefunded: fully } };
   },
 };

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { z } from 'zod';
 import { argsHash } from '../db/args-hash.js';
 import { writeAudit } from './audit.js';
 import { issueRefund } from './refund.js';
@@ -31,6 +32,12 @@ export async function requestWrite(
     const reason = !handler ? 'tool_not_supported' : 'role_not_permitted';
     await writeAudit(db, { ...base, outcome: 'denied', errorCode: reason });
     return { kind: 'denied', reason };
+  }
+  // Runtime callers can bypass the TS type; reject a missing/blank key before it reaches the approvals query.
+  const key: unknown = input.idempotencyKey;
+  if (typeof key !== 'string' || key.trim().length === 0) {
+    await db.transaction((tx) => writeAudit(tx, { ...base, idempotencyKey: null, outcome: 'error', errorCode: 'invalid_args' }));
+    return { kind: 'invalid_args', issues: [{ code: 'custom', path: ['idempotencyKey'], message: 'idempotency key must be a non-empty string', input: key } as z.core.$ZodIssue] };
   }
   const parsed = handler.schema.safeParse(input.args);
   if (!parsed.success) {
@@ -87,7 +94,8 @@ export async function resolveApproval(
   const startedAt = performance.now();
   const correlationId = input.correlationId ?? randomUUID();
   const base = { actor: input.actor, role: input.role, tool: 'resolve_approval', args: { approvalId: input.approvalId, decision: input.decision }, approvalId: null as string | null, startedAt, correlationId };
-  if (!isUuid(input.approvalId)) {
+  const decision: unknown = input.decision;
+  if (!isUuid(input.approvalId) || (decision !== 'approve' && decision !== 'deny')) {
     await writeAudit(db, { ...base, outcome: 'error', errorCode: 'invalid_args' });
     return { kind: 'invalid_args' };
   }

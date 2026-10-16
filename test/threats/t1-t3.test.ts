@@ -281,3 +281,52 @@ describe('malformed approval ids (Codex P2)', () => {
     });
   }
 });
+
+describe('runtime input hardening (Codex re-review)', () => {
+  let shared: Awaited<ReturnType<typeof invoice>>;
+  const sharedInv = async () => (shared ??= await invoice('unpaid'));
+  for (const [label, key] of [['missing', undefined], ['empty', ''], ['blank', '   '], ['non-string', 42]] as const) {
+    it(`rejects a ${label} idempotency key as invalid_args, audited, no approval`, async () => {
+      const inv = await sharedInv();
+      const approvalsBefore = await n('approvals');
+      const auditBefore = await n('audit_events');
+      const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 100), idempotencyKey: key as unknown as string });
+      expect(r.kind).toBe('invalid_args');
+      expect(await n('approvals')).toBe(approvalsBefore);
+      expect(await n('audit_events')).toBe(auditBefore + 1);
+      expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'invalid_args', approval_id: null });
+    });
+  }
+
+  for (const decision of ['APPROVE', 'yes', '', null, 1]) {
+    it(`rejects decision ${JSON.stringify(decision)} as invalid_args and leaves the approval pending`, async () => {
+      const inv = await sharedInv();
+      const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 100), idempotencyKey: `dec-${String(decision)}-${inv.id}` });
+      if (r.kind !== 'pending') throw new Error(r.kind);
+      const res = await resolveApproval(db, { ...admin, approvalId: r.approvalId, decision: decision as unknown as 'approve' });
+      expect(res).toEqual({ kind: 'invalid_args' });
+      expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'invalid_args' });
+      const st = await ctx.client.query<{ status: string }>('select status from approvals where id = $1', [r.approvalId]);
+      expect(st.rows[0].status).toBe('pending');
+    });
+  }
+
+  it('refund remaining is exact above Number.MAX_SAFE_INTEGER (bigint end to end)', async () => {
+    const inv = await invoice('part_paid');
+    // 2^53 + 1 is not representable as a double; Number() would round it down to 2^53.
+    // Fixture setup runs as the owner (PGlite shares one session with the app role), then drops back.
+    await ctx.client.query('reset role');
+    try {
+      await ctx.client.query(`update invoices set total_paise = 9007199254740993, paid_paise = 9007199254740993 where id = $1`, [inv.id]);
+    } finally {
+      if (!process.env.DATABASE_URL) await ctx.client.query('set role meridian_app');
+    }
+    const id = await approved(`big-${inv.id}`, refundArgs(inv.id, Number.MAX_SAFE_INTEGER));
+    const ex = await executeApproval(db, id, admin);
+    expect(ex.kind).toBe('executed');
+    if (ex.kind !== 'executed') return;
+    expect(ex.result).toMatchObject({ remainingPaise: '2', invoiceRefunded: false });
+    const st = await ctx.client.query<{ status: string }>('select status from invoices where id = $1', [inv.id]);
+    expect(st.rows[0].status).not.toBe('refunded');
+  });
+});
