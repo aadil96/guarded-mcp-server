@@ -39,7 +39,8 @@ export type ResolveResult =
   | { kind: 'resolved'; approvalId: string; status: 'approved' | 'denied' }
   | { kind: 'denied'; reason: string }
   | { kind: 'not_found' }
-  | { kind: 'invalid_state'; status: ApprovalStatus };
+  | { kind: 'invalid_state'; status: ApprovalStatus }
+  | { kind: 'invalid_args' };
 
 export type ExecuteResult =
   | { kind: 'executed'; approvalId: string; result: unknown }
@@ -47,7 +48,8 @@ export type ExecuteResult =
   | { kind: 'duplicate'; approvalId: string; status: ApprovalStatus; result: unknown }
   | { kind: 'not_approved'; status: ApprovalStatus }
   | { kind: 'denied'; reason: string }
-  | { kind: 'not_found' };
+  | { kind: 'not_found' }
+  | { kind: 'invalid_args' };
 
 export type HandlerOutcome = { ok: true; result: Record<string, unknown> } | { ok: false; error: string };
 

@@ -11,6 +11,10 @@ export { formatInr } from './refund.js';
 
 export const defaultHandlers: HandlerMap = { issue_refund: issueRefund };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Reject malformed ids before they reach Postgres (which would throw 22P02 and skip the audit row). */
+export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v);
+
 const getApproval = async (sql: Sql, id: string) =>
   (await sql.query<Approval>('select * from approvals where id = $1', [id])).rows[0];
 
@@ -60,16 +64,18 @@ export async function requestWrite(
   if (existing) return classify(existing);
 
   const summary = await handler.summarize(db, args);
-  const inserted = await db.query<Approval>(
-    `insert into approvals (id, tool, idempotency_key, args_hash, arguments, summary, requested_by)
-     values ($1,$2,$3,$4,$5,$6,$7)
-     on conflict (tool, idempotency_key) do nothing returning *`,
-    [randomUUID(), input.tool, input.idempotencyKey, hash, JSON.stringify(args), summary, input.actor],
-  );
-  if (inserted.rows[0]) {
-    await writeAudit(db, { ...base, outcome: 'pending_approval', approvalId: inserted.rows[0].id });
-    return { kind: 'pending', approvalId: inserted.rows[0].id, summary, approval: inserted.rows[0] };
-  }
+  // Insert and its audit row commit together; an audit failure rolls the approval back.
+  const created = await db.transaction(async (tx) => {
+    const inserted = await tx.query<Approval>(
+      `insert into approvals (id, tool, idempotency_key, args_hash, arguments, summary, requested_by)
+       values ($1,$2,$3,$4,$5,$6,$7)
+       on conflict (tool, idempotency_key) do nothing returning *`,
+      [randomUUID(), input.tool, input.idempotencyKey, hash, JSON.stringify(args), summary, input.actor],
+    );
+    if (inserted.rows[0]) await writeAudit(tx, { ...base, outcome: 'pending_approval', approvalId: inserted.rows[0].id });
+    return inserted.rows[0];
+  });
+  if (created) return { kind: 'pending', approvalId: created.id, summary, approval: created };
   // Lost a concurrent insert race: classify against the winner.
   return classify(await find() as Approval);
 }
@@ -81,6 +87,10 @@ export async function resolveApproval(
   const startedAt = performance.now();
   const correlationId = input.correlationId ?? randomUUID();
   const base = { actor: input.actor, role: input.role, tool: 'resolve_approval', args: { approvalId: input.approvalId, decision: input.decision }, approvalId: null as string | null, startedAt, correlationId };
+  if (!isUuid(input.approvalId)) {
+    await writeAudit(db, { ...base, outcome: 'error', errorCode: 'invalid_args' });
+    return { kind: 'invalid_args' };
+  }
   const row = await getApproval(db, input.approvalId);
   if (!row) {
     await writeAudit(db, { ...base, outcome: 'error', errorCode: 'not_found' });
@@ -95,17 +105,20 @@ export async function resolveApproval(
     return { kind: 'denied', reason };
   }
   const status = input.decision === 'approve' ? 'approved' : 'denied';
-  const upd = await db.query<Approval>(
-    `update approvals set status = $2, resolved_by = $3, resolved_at = now() where id = $1 and status = 'pending' returning *`,
-    [row.id, status, input.actor],
-  );
-  if (!upd.rows[0]) {
-    const cur = await getApproval(db, row.id) as Approval;
-    await writeAudit(db, { ...base, outcome: 'error', errorCode: 'not_pending' });
-    return { kind: 'invalid_state', status: cur.status };
-  }
-  await writeAudit(db, { ...base, outcome: 'ok' });
-  return { kind: 'resolved', approvalId: row.id, status };
+  // Status change and its audit row commit in one transaction.
+  return db.transaction(async (tx): Promise<ResolveResult> => {
+    const upd = await tx.query<Approval>(
+      `update approvals set status = $2, resolved_by = $3, resolved_at = now() where id = $1 and status = 'pending' returning *`,
+      [row.id, status, input.actor],
+    );
+    if (!upd.rows[0]) {
+      const cur = await getApproval(tx, row.id) as Approval;
+      await writeAudit(tx, { ...base, outcome: 'error', errorCode: 'not_pending' });
+      return { kind: 'invalid_state', status: cur.status };
+    }
+    await writeAudit(tx, { ...base, outcome: 'ok' });
+    return { kind: 'resolved', approvalId: row.id, status };
+  });
 }
 
 export async function executeApproval(
@@ -119,6 +132,10 @@ export async function executeApproval(
   if (caller.role === 'reader') {
     await writeAudit(db, { actor: caller.actor, role: caller.role, tool: 'execute_approval', args: { approvalId }, outcome: 'denied', startedAt, correlationId, errorCode: 'role_not_permitted' });
     return { kind: 'denied', reason: 'role_not_permitted' };
+  }
+  if (!isUuid(approvalId)) {
+    await writeAudit(db, { actor: caller.actor, role: caller.role, tool: 'execute_approval', args: { approvalId }, outcome: 'error', startedAt, correlationId, errorCode: 'invalid_args' });
+    return { kind: 'invalid_args' };
   }
   return db.transaction(async (tx): Promise<ExecuteResult> => {
     // Audit is written through tx so the business write and its audit row commit or roll back together.

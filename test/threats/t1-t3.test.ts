@@ -235,3 +235,49 @@ describe('audit', () => {
     expect(outcomes).toEqual(['conflict', 'denied', 'duplicate', 'error', 'ok', 'pending_approval']);
   });
 });
+
+/** Same Db, but any audit insert inside a transaction fails, to prove the business write rolls back with it. */
+const auditFailing = (inner: Db): Db => ({
+  query: (q, p) => inner.query(q, p),
+  transaction: (fn) => inner.transaction((tx) => fn({
+    query: (q, p) => (/insert into audit_events/i.test(q) ? Promise.reject(new Error('forced audit failure')) : tx.query(q, p)),
+  })),
+});
+
+describe('audit atomicity (Codex P1/P2)', () => {
+  it('requestWrite: forced audit failure rolls back the approval insert', async () => {
+    const inv = await invoice('part_paid');
+    const audits = await n('audit_events');
+    await expect(requestWrite(auditFailing(db), { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 100), idempotencyKey: 'atom-req' }))
+      .rejects.toThrow('forced audit failure');
+    expect(await n(`approvals where idempotency_key = 'atom-req'`)).toBe(0);
+    expect(await n('audit_events')).toBe(audits);
+  });
+
+  it('resolveApproval: forced audit failure rolls back the status change', async () => {
+    const inv = await invoice('part_paid');
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 100), idempotencyKey: 'atom-res' });
+    if (r.kind !== 'pending') throw new Error(r.kind);
+    const audits = await n('audit_events');
+    await expect(resolveApproval(auditFailing(db), { ...admin, approvalId: r.approvalId, decision: 'approve' }))
+      .rejects.toThrow('forced audit failure');
+    const row = (await ctx.client.query<{ status: string; resolved_by: string | null }>('select status, resolved_by from approvals where id = $1', [r.approvalId])).rows[0];
+    expect(row).toEqual({ status: 'pending', resolved_by: null });
+    expect(await n('audit_events')).toBe(audits);
+  });
+});
+
+describe('malformed approval ids (Codex P2)', () => {
+  for (const bad of ['not-a-uuid', '', "1' or '1'='1", '00000000-0000-0000-0000-00000000000g']) {
+    it(`resolve + execute reject ${JSON.stringify(bad)} as invalid_args with an audit row`, async () => {
+      const before = await n('audit_events');
+      expect(await resolveApproval(db, { ...admin, approvalId: bad, decision: 'approve' })).toEqual({ kind: 'invalid_args' });
+      let a = await lastAudit();
+      expect(a).toMatchObject({ outcome: 'error', error_code: 'invalid_args', approval_id: null });
+      expect(await executeApproval(db, bad, admin)).toEqual({ kind: 'invalid_args' });
+      a = await lastAudit();
+      expect(a).toMatchObject({ outcome: 'error', error_code: 'invalid_args', approval_id: null });
+      expect(await n('audit_events')).toBe(before + 2);
+    });
+  }
+});
