@@ -38,17 +38,17 @@ const def = <S extends z.ZodObject>(d: Def<S>) => d;
 export const readTools = {
   list_customers: def({
     description: `List customers, oldest first. Paginated, max ${MAX_PAGE} per page.`,
-    input: z.object({ limit, offset }),
+    input: z.object({ limit, offset }).strict(),
     run: (db, a) => db.select(customerCols).from(s.customers).orderBy(asc(s.customers.createdAt), asc(s.customers.id)).limit(page(a).limit).offset(page(a).offset),
   }),
   get_customer: def({
     description: 'Get one customer by id.',
-    input: z.object({ customer_id: uuid }),
+    input: z.object({ customer_id: uuid }).strict(),
     run: async (db, a) => one(await db.select(customerCols).from(s.customers).where(eq(s.customers.id, a.customer_id)), 'customer'),
   }),
   list_orders: def({
     description: `List orders, newest first, optionally filtered by customer_id and/or status. Max ${MAX_PAGE}.`,
-    input: z.object({ customer_id: uuid.optional(), status: z.enum(s.orderStatus.enumValues).optional(), limit, offset }),
+    input: z.object({ customer_id: uuid.optional(), status: z.enum(s.orderStatus.enumValues).optional(), limit, offset }).strict(),
     run: (db, a) => {
       const w: SQL[] = [];
       if (a.customer_id) w.push(eq(s.orders.customerId, a.customer_id));
@@ -58,7 +58,7 @@ export const readTools = {
   }),
   get_order: def({
     description: 'Get one order by id, with its line items.',
-    input: z.object({ order_id: uuid }),
+    input: z.object({ order_id: uuid }).strict(),
     run: async (db, a) => {
       const order = one(await db.select(orderCols).from(s.orders).where(eq(s.orders.id, a.order_id)), 'order');
       const items = await db.select({
@@ -70,7 +70,7 @@ export const readTools = {
   }),
   list_invoices: def({
     description: `List invoices, newest first, optionally filtered by customer_id and/or status. Max ${MAX_PAGE}.`,
-    input: z.object({ customer_id: uuid.optional(), status: z.enum(s.invoiceStatus.enumValues).optional(), limit, offset }),
+    input: z.object({ customer_id: uuid.optional(), status: z.enum(s.invoiceStatus.enumValues).optional(), limit, offset }).strict(),
     run: (db, a) => {
       const w: SQL[] = [];
       if (a.customer_id) w.push(eq(s.invoices.customerId, a.customer_id));
@@ -80,12 +80,12 @@ export const readTools = {
   }),
   get_invoice: def({
     description: 'Get one invoice by id.',
-    input: z.object({ invoice_id: uuid }),
+    input: z.object({ invoice_id: uuid }).strict(),
     run: async (db, a) => one(await db.select().from(s.invoices).where(eq(s.invoices.id, a.invoice_id)), 'invoice'),
   }),
   search_orders: def({
     description: `Search orders by order number or customer name (case-insensitive substring; wildcards are matched literally). Max ${MAX_PAGE}.`,
-    input: z.object({ query: z.string().min(1).max(100), limit }),
+    input: z.object({ query: z.string().min(1).max(100), limit }).strict(),
     run: (db, a) => {
       const pat = `%${escapeLike(a.query)}%`;
       return db.select({ ...orderCols, customerName: s.customers.name }).from(s.orders)
@@ -96,7 +96,7 @@ export const readTools = {
   }),
   list_pending_approvals: def({
     description: `List write requests waiting for a human decision, oldest first. Max ${MAX_PAGE}.`,
-    input: z.object({ limit }),
+    input: z.object({ limit }).strict(),
     run: (db, a) => db.select({
       id: s.approvals.id, tool: s.approvals.tool, summary: s.approvals.summary, arguments: s.approvals.arguments,
       requestedBy: s.approvals.requestedBy, createdAt: s.approvals.createdAt,

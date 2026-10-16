@@ -111,7 +111,7 @@ describe('audit', () => {
   it('every call writes exactly one row, including errors', async () => {
     await call('list_customers', { limit: 1 });
     expect(await auditCount()).toBe(before + 1);
-    const missing = await call('get_order', { order_id: '00000000-0000-4000-8000-000000000000', api_token: 'shh' });
+    const missing = await call('get_order', { order_id: '00000000-0000-4000-8000-000000000000' });
     expect(missing).toMatchObject({ isError: true, data: { error: 'not_found' } });
     expect(await auditCount()).toBe(before + 2);
     const bad = await call('get_invoice', { invoice_id: 'not-a-uuid' });
@@ -122,7 +122,7 @@ describe('audit', () => {
     )).rows;
     const nf = rows.find((r) => r.tool === 'get_order');
     expect(nf).toMatchObject({ actor: 'test-actor', role: 'reader', outcome: 'error', error_code: 'not_found' });
-    expect(nf?.arguments).toEqual({ order_id: '00000000-0000-4000-8000-000000000000', api_token: '[redacted]' });
+    expect(nf?.arguments).toEqual({ order_id: '00000000-0000-4000-8000-000000000000' });
     const ok = rows.find((r) => r.tool === 'list_customers');
     expect(ok).toMatchObject({ outcome: 'ok', error_code: null });
     expect(Number(ok?.duration_ms)).toBeGreaterThanOrEqual(0);
@@ -172,9 +172,22 @@ describe('MCP server over in-memory transport', () => {
     )).rows;
     expect(row).toEqual([{ tool: 'get_invoice', arguments: { invoice_id: 'nope', password: '[redacted]' }, outcome: 'error', error_code: 'invalid_args', actor: 'test-actor', role: 'reader' }]);
 
-    // tools/list is not a tool call and writes nothing.
-    await rpc('tools/list', {});
-    expect(await auditCount()).toBe(before + 3);
+    // Unknown key with otherwise valid arguments: rejected by the strict schema, audited once by the hook.
+    const extra = await rpc('tools/call', { name: 'get_order', arguments: { order_id: seedId('order:1'), api_token: 'shh', note: 'x' } });
+    expect(extra.result?.isError).toBe(true);
+    expect(JSON.stringify(extra.result)).toContain('Input validation error');
+    expect(await auditCount()).toBe(before + 4);
+    const extraRows = (await ctx.client.query<Record<string, unknown>>(
+      `select tool, arguments, outcome, error_code from audit_events where tool = 'get_order' and arguments ? 'note'`,
+    )).rows;
+    expect(extraRows).toEqual([{ tool: 'get_order', arguments: { order_id: seedId('order:1'), api_token: '[redacted]', note: 'x' }, outcome: 'error', error_code: 'invalid_args' }]);
+
+    // tools/list is not a tool call and writes nothing; schemas advertise no extra keys.
+    const listed = await rpc('tools/list', {});
+    expect(await auditCount()).toBe(before + 4);
+    for (const t of (listed.result?.tools ?? []) as { inputSchema: { additionalProperties?: unknown } }[]) {
+      expect(t.inputSchema.additionalProperties).toBe(false);
+    }
     await clientT.close();
   });
 });

@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { callerFromEnv } from '../src/audit/log.js';
-import { APP_ROLE, appDb, createAppPool } from '../src/db/connect.js';
+import { APP_ROLE, appDb, createAppPool, verifyAppRole } from '../src/db/connect.js';
 import { seed, seedId } from '../src/db/seed.js';
 import type { Db } from '../src/db/types.js';
 import { callTool } from '../src/server.js';
@@ -60,5 +60,33 @@ describe(`server db connection runs as ${APP_ROLE}`, () => {
   it('cannot change order totals or insert customers', async () => {
     await expect(run('update orders set total_paise = 1')).rejects.toThrow();
     await expect(run(`insert into customers (id, name, city, gstin, phone, email) values (gen_random_uuid(), 'x', 'x', 'x', 'x', 'x')`)).rejects.toThrow();
+  });
+});
+
+// Real PG only: PGlite is a single in-process session with no separate login roles.
+describe.runIf(process.env.DATABASE_URL)('fails closed when SET ROLE is not allowed', () => {
+  it('a login without meridian_app membership cannot query or pass the startup probe', async () => {
+    const login = `t_nomember_${Math.random().toString(36).slice(2, 10)}`;
+    const dbName = new URL(ctx.url as string).pathname.slice(1);
+    await ctx.client.query(`CREATE ROLE ${login} LOGIN PASSWORD 'pw'`);
+    await ctx.client.query(`GRANT CONNECT ON DATABASE ${dbName} TO ${login}`);
+    // Give the login direct read access, so a silent fallback to the login user WOULD succeed.
+    await ctx.client.query(`GRANT USAGE ON SCHEMA public TO ${login}`);
+    await ctx.client.query(`GRANT SELECT ON orders TO ${login}`);
+    const u = new URL(ctx.url as string);
+    u.username = login;
+    u.password = 'pw';
+    const pool = createAppPool(u.toString());
+    try {
+      await expect(pool.query('select count(*) from orders')).rejects.toThrow(/permission denied to set role/);
+      await expect(verifyAppRole(pool)).rejects.toThrow();
+      expect(pool.totalCount).toBe(0); // failed connections were destroyed, not kept
+    } finally {
+      await pool.end();
+      await ctx.client.query(`REVOKE ALL ON orders FROM ${login}`);
+      await ctx.client.query(`REVOKE ALL ON SCHEMA public FROM ${login}`);
+      await ctx.client.query(`REVOKE ALL ON DATABASE ${dbName} FROM ${login}`);
+      await ctx.client.query(`DROP ROLE ${login}`);
+    }
   });
 });
