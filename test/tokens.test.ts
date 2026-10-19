@@ -43,8 +43,9 @@ describe('authenticate', () => {
     expect(minted.line).not.toContain(minted.token);
     expect(authenticate(`Bearer ${minted.token}`, entries)).toEqual({ ok: true, caller: { actor: 'bob', role: 'reader', scopes: ['read'] } });
   });
-  it('matches the Bearer scheme case-insensitively (RFC 9110) but the token exactly', () => {
+  it('matches the Bearer scheme case-insensitively with 1*SP after it (RFC 9110, RFC 6750) but the token exactly', () => {
     for (const scheme of ['bearer', 'BEARER', 'bEaReR']) expect(authenticate(`${scheme} ${minted.token}`, entries).ok).toBe(true);
+    expect(authenticate(`Bearer   ${minted.token}`, entries).ok).toBe(true);
     expect(authenticate(`Bearer ${minted.token.toUpperCase()}`, entries)).toEqual({ ok: false, reason: 'invalid_token' });
   });
   it('rejects missing, wrong, non-Bearer and oversized headers', () => {
