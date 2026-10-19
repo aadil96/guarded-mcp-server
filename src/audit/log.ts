@@ -3,7 +3,8 @@ import { sql } from 'drizzle-orm';
 import { auditEvents } from '../db/schema.js';
 import type { AppTx } from '../db/types.js';
 
-export type Caller = { actor: string; role: 'reader' | 'operator' | 'admin'; correlationId?: string };
+export type Role = 'reader' | 'operator' | 'admin';
+export type Caller = { actor: string; role: Role; correlationId?: string };
 
 export function callerFromEnv(env: NodeJS.ProcessEnv = process.env): Caller {
   const role = env.MCP_ROLE === 'operator' ? 'operator' : 'reader';
@@ -83,26 +84,30 @@ function auditJson(args: unknown): string {
 }
 
 export type AuditOutcome = 'ok' | 'error' | 'denied' | 'pending_approval' | 'duplicate' | 'conflict';
-export type AuditRole = 'reader' | 'operator' | 'admin' | 'invalid';
+/** Role as recorded in audit_events: a real role, or the placeholder for invalid caller metadata. */
+export type AuditRole = Role | 'invalid';
 
 export type AuditEntry = {
   actor: string; role: AuditRole; tool: string; args: unknown; outcome: AuditOutcome;
   approvalId?: string | null; idempotencyKey?: string | null; startedAt: number; correlationId: string; errorCode?: string | null;
 };
 
+/** Text columns get the same treatment as jsonb: a NUL or lone surrogate from a client must not fail the insert. */
+const auditText = (s: string) => jsonbSafe(s.slice(0, 200));
+
 /** Appends exactly one audit_events row through a transaction handle. */
 export async function writeAudit(tx: AppTx, e: AuditEntry) {
   await tx.insert(auditEvents).values({
     id: randomUUID(),
-    actor: e.actor,
+    actor: auditText(e.actor),
     role: e.role,
-    tool: e.tool,
+    tool: auditText(e.tool),
     arguments: sql`${auditJson(e.args)}::jsonb`,
     outcome: e.outcome,
     approvalId: e.approvalId ?? null,
     idempotencyKey: e.idempotencyKey ?? null,
     durationMs: Math.max(0, Math.round(performance.now() - e.startedAt)),
-    correlationId: e.correlationId,
-    errorCode: e.errorCode ?? null,
+    correlationId: auditText(e.correlationId),
+    errorCode: e.errorCode == null ? null : auditText(e.errorCode),
   });
 }
