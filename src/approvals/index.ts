@@ -54,9 +54,11 @@ export async function requestWrite(
   const startedAt = performance.now();
   const caller = checkCaller(input);
   const correlationId = caller.correlationId;
-  const rawKey: unknown = input.idempotencyKey;
+  // Whole-request guard: null/undefined/non-object requests reach the audited invalid-caller branch.
+  const req = (input && typeof input === 'object' ? input : {}) as Partial<typeof input>;
+  const rawKey: unknown = req.idempotencyKey;
   const auditKey = typeof rawKey === 'string' && Buffer.byteLength(rawKey, 'utf8') <= MAX_IDEMPOTENCY_KEY_BYTES ? rawKey : null;
-  const base = { actor: caller.actor, role: caller.role, tool: String(input.tool), args: input.args ?? null, idempotencyKey: auditKey, startedAt, correlationId };
+  const base = { actor: caller.actor, role: caller.role, tool: typeof req.tool === 'string' ? req.tool.slice(0, 200) : '[invalid]', args: req.args ?? null, idempotencyKey: auditKey, startedAt, correlationId };
   if (!caller.ok) {
     await db.transaction((tx) => writeAudit(tx, { ...base, outcome: 'error', errorCode: 'invalid_args' }));
     return { kind: 'invalid_args', issues: [callerIssue] };

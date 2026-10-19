@@ -417,4 +417,32 @@ describe('runtime input hardening (Codex re-review)', () => {
       expect(await lastAudit()).toMatchObject({ outcome: 'denied', error_code: 'tool_not_supported' });
     });
   }
+
+  for (const [label, req] of [['null', null], ['undefined', undefined], ['a number', 5]] as const) {
+    it(`requestWrite with ${label} as the whole request is audited with placeholders and returns invalid_args`, async () => {
+      const auditBefore = await n('audit_events');
+      expect((await requestWrite(db, req as never)).kind).toBe('invalid_args');
+      expect(await n('audit_events')).toBe(auditBefore + 1);
+      expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'invalid_args' });
+      const a = await ctx.client.query<{ actor: string; role: string }>('select actor, role from audit_events order by created_at desc, ctid desc limit 1');
+      expect(a.rows[0]).toEqual({ actor: 'unknown', role: 'invalid' });
+    });
+  }
+
+  it('non-JSON-safe and cyclic rejected arguments still produce an audit row and invalid_args', async () => {
+    const inv = await sharedInv();
+    const cyclic: Record<string, unknown> = { invoice_id: inv.id, amount_paise: 100, reason: 'x' };
+    cyclic.self = cyclic;
+    for (const args of [{ invoice_id: inv.id, amount_paise: 1n, reason: 'x' }, cyclic, { invoice_id: inv.id, amount_paise: 100, reason: 'x', fn: () => 1 }]) {
+      const auditBefore = await n('audit_events');
+      const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: args as never, idempotencyKey: `unsafe-${auditBefore}` });
+      expect(r.kind).toBe('invalid_args');
+      expect(await n('audit_events')).toBe(auditBefore + 1);
+      expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'invalid_args' });
+    }
+    const a = await ctx.client.query<{ arguments: Record<string, unknown> }>(`select arguments from audit_events where idempotency_key like 'unsafe-%' order by created_at, ctid`);
+    expect(a.rows[0].arguments.amount_paise).toBe('1n');
+    expect(a.rows[1].arguments.self).toBe('[circular]');
+    expect(a.rows[2].arguments.fn).toBe('[function]');
+  });
 });
