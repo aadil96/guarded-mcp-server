@@ -5,6 +5,7 @@ import { sql } from 'drizzle-orm';
 import { closeAppDb, connectAsApp, queryRows } from '../../src/db/index.js';
 import type { AppDb } from '../../src/db/types.js';
 import { auditFailing, freshDb } from '../helpers.js';
+import { zApprovalId } from '../../src/domain/brands.js';
 
 let ctx: Awaited<ReturnType<typeof freshDb>>;
 let db: AppDb;
@@ -56,7 +57,7 @@ describe('T1 idempotency', () => {
     const a = await requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 't1-same' });
     expect(a.kind).toBe('pending');
     if (a.kind !== 'pending') return;
-    expect(a.summary).toBe(`Refund ₹1.00 on ${inv.number}`);
+    expect(a.summary).toMatch(new RegExp(`^Refund ₹1\\.00 on ${inv.number}; ₹[\\d,]+\\.\\d{2} refundable when requested$`));
     expect((await lastAudit()).outcome).toBe('pending_approval');
     const b = await requestWrite(db, { ...op, tool: 'issue_refund', args: { reason: args.reason, amount_paise: 100, invoice_id: inv.id }, idempotencyKey: 't1-same' });
     expect(b).toMatchObject({ kind: 'pending', approvalId: a.approvalId });
@@ -334,7 +335,7 @@ describe('every approvals path writes exactly one audit row', () => {
   it('create, repeat, resolve, execute, replay and each rejection add +1 audit row', async () => {
     const inv = await invoice('part_paid');
     const args = refundArgs(inv.id, 100);
-    let approvalId = '';
+    let approvalId = zApprovalId.parse('00000000-0000-4000-8000-000000000000');
     const steps: [string, () => Promise<unknown>][] = [
       ['create', async () => { const r = await requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 'one-row' }); if (r.kind !== 'pending') throw new Error(r.kind); approvalId = r.approvalId; }],
       ['repeat while pending', () => requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 'one-row' })],
@@ -347,10 +348,10 @@ describe('every approvals path writes exactly one audit row', () => {
       ['reader request denied', () => requestWrite(db, { ...reader, tool: 'issue_refund', args, idempotencyKey: 'one-row-r' })],
       ['invalid args', () => requestWrite(db, { ...op, tool: 'issue_refund', args: { invoice_id: inv.id }, idempotencyKey: 'one-row-bad' })],
       ['invalid caller', () => requestWrite(db, { actor: '', role: 'operator', tool: 'issue_refund', args, idempotencyKey: 'one-row-c' })],
-      ['resolve not found', () => resolveApproval(db, { ...admin, approvalId: '00000000-0000-4000-8000-000000000000', decision: 'approve' })],
+      ['resolve not found', () => resolveApproval(db, { ...admin, approvalId: zApprovalId.parse('00000000-0000-4000-8000-000000000000'), decision: 'approve' })],
       ['resolve by non-admin', () => resolveApproval(db, { ...op, approvalId, decision: 'deny' })],
       ['execute by reader', () => executeApproval(db, approvalId, reader)],
-      ['execute malformed id', () => executeApproval(db, 'nope', admin)],
+      ['execute malformed id', () => executeApproval(db, 'nope' as never, admin)],
     ];
     for (const [label, step] of steps) {
       const before = await n('audit_events');
@@ -366,10 +367,10 @@ describe('malformed approval ids (Codex P2)', () => {
   for (const bad of ['not-a-uuid', '', "1' or '1'='1", '00000000-0000-0000-0000-00000000000g']) {
     it(`resolve + execute reject ${JSON.stringify(bad)} as invalid_args with an audit row`, async () => {
       const before = await n('audit_events');
-      expect(await resolveApproval(db, { ...admin, approvalId: bad, decision: 'approve' })).toEqual({ kind: 'invalid_args' });
+      expect(await resolveApproval(db, { ...admin, approvalId: bad as never, decision: 'approve' })).toEqual({ kind: 'invalid_args' });
       let a = await lastAudit();
       expect(a).toMatchObject({ outcome: 'error', error_code: 'invalid_args', approval_id: null });
-      expect(await executeApproval(db, bad, admin)).toEqual({ kind: 'invalid_args' });
+      expect(await executeApproval(db, bad as never, admin)).toEqual({ kind: 'invalid_args' });
       a = await lastAudit();
       expect(a).toMatchObject({ outcome: 'error', error_code: 'invalid_args', approval_id: null });
       expect(await n('audit_events')).toBe(before + 2);
@@ -429,7 +430,7 @@ describe('runtime input hardening (Codex re-review)', () => {
     const inv = await sharedInv();
     const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, Number.MAX_SAFE_INTEGER), idempotencyKey: `sum-max-${inv.id}` });
     if (r.kind !== 'pending') throw new Error(r.kind);
-    expect(r.summary).toBe(`Refund ₹9,00,71,99,25,47,409.91 on ${inv.number}`);
+    expect(r.summary.startsWith(`Refund ₹9,00,71,99,25,47,409.91 on ${inv.number}; `)).toBe(true);
   });
 
   it('rejects an idempotency key over 200 UTF-8 bytes as invalid_args, audited, no approval', async () => {

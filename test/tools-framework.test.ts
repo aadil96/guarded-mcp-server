@@ -11,6 +11,7 @@ import { approvalHandlers, assertStrict, defineReadTool, defineWriteTool, mapReq
 import { issueRefund, issueRefundSchema } from '../src/approvals/refund.js';
 import { issueRefundTool } from '../src/tools/write.js';
 import { freshDb, mcpClient } from './helpers.js';
+import { zApprovalId } from '../src/domain/brands.js';
 
 const parse = (r: { content: { type: string; text?: string }[]; isError?: boolean }) =>
   ({ isError: r.isError === true, type: r.content[0].type, data: JSON.parse(r.content[0].text as string) });
@@ -68,7 +69,7 @@ describe('registration only through the framework', () => {
 });
 
 describe('mapRequestWriteResult keeps every field per outcome', () => {
-  const id = '11111111-1111-4111-8111-111111111111';
+  const id = zApprovalId.parse('11111111-1111-4111-8111-111111111111');
   const cases: [RequestWriteResult, boolean, Record<string, unknown>][] = [
     [{ kind: 'pending', approvalId: id, summary: 'Refund ₹1.00 on INV-1', approval: {} as never }, false, { status: 'pending_approval', approvalId: id, summary: 'Refund ₹1.00 on INV-1' }],
     [{ kind: 'duplicate', approvalId: id, status: 'executed', result: { refundId: 'r' } }, false, { status: 'duplicate', approvalId: id, approvalStatus: 'executed', result: { refundId: 'r' } }],
@@ -141,7 +142,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
 
   it('duplicate (executed): the stored result and approvalStatus, via the same handler executeApproval runs', async () => {
     const { data } = await cli.call('issue_refund', args(100, 'mcp-1'));
-    const id = data.approvalId as string;
+    const id = zApprovalId.parse(data.approvalId);
     expect((await resolveApproval(db, { ...admin, approvalId: id, decision: 'approve' })).kind).toBe('resolved');
     const ex = await executeApproval(db, id, admin, approvalHandlers([issueRefundTool]));
     if (ex.kind !== 'executed') throw new Error(ex.kind);
@@ -151,7 +152,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
 
   it('duplicate (failed): isError, with approvalStatus failed and the stored error', async () => {
     const { data } = await cli.call('issue_refund', args(999_999_999, 'mcp-fail'));
-    const id = data.approvalId as string;
+    const id = zApprovalId.parse(data.approvalId);
     await resolveApproval(db, { ...admin, approvalId: id, decision: 'approve' });
     expect((await executeApproval(db, id, admin, approvalHandlers([issueRefundTool]))).kind).toBe('failed');
     const r = await step(() => cli.call('issue_refund', args(999_999_999, 'mcp-fail')));
@@ -161,7 +162,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
 
   it('denied (previously_denied): isError with the reason', async () => {
     const { data } = await cli.call('issue_refund', args(100, 'mcp-deny'));
-    await resolveApproval(db, { ...admin, approvalId: data.approvalId as string, decision: 'deny' });
+    await resolveApproval(db, { ...admin, approvalId: zApprovalId.parse(data.approvalId), decision: 'deny' });
     const r = await step(() => cli.call('issue_refund', args(100, 'mcp-deny')));
     expect(r).toMatchObject({ isError: true, data: { error: 'denied', reason: 'previously_denied' } });
   });
@@ -191,7 +192,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
     try {
       const r = await step(() => c.call('issue_refund', args(100, 'mcp-async')));
       expect(r).toMatchObject({ isError: false, data: { status: 'pending_approval', summary: 'refund 100 paise' } });
-      const id = r.data.approvalId as string;
+      const id = zApprovalId.parse(r.data.approvalId);
       expect((await resolveApproval(db, { ...admin, approvalId: id, decision: 'approve' })).kind).toBe('resolved');
       expect((await executeApproval(db, id, admin, approvalHandlers([asyncRefined]))).kind).toBe('executed');
       expect(seen).toEqual({ invoice_id: invoiceId, amount_paise: 100, reason: 'damaged in transit' });
