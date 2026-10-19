@@ -11,6 +11,19 @@ export function callerFromEnv(env: NodeJS.ProcessEnv = process.env): Caller {
   return { actor: env.MCP_ACTOR || 'local-dev', role };
 }
 
+/**
+ * The approvals console's caller, from the process environment its operator controls (never from argv).
+ * Both variables are required and nothing defaults to admin. The MCP server's caller (callerFromEnv) can never
+ * be admin, so no MCP client can approve; approving needs this console and the database credentials.
+ */
+export function approverFromEnv(env: NodeJS.ProcessEnv = process.env): Caller {
+  const actor = env.APPROVER_ACTOR?.trim();
+  if (!actor) throw new Error('APPROVER_ACTOR is required (the person running the approvals console)');
+  const role = env.APPROVER_ROLE;
+  if (role !== 'admin' && role !== 'operator') throw new Error('APPROVER_ROLE must be "admin" or "operator"');
+  return { actor, role };
+}
+
 // Redaction and JSON-safety (single canonical implementation)
 // Union of the two matchers this replaced (approvals audit and read-path audit); never drop a key from it.
 const SENSITIVE = /(email|phone|gstin|token|secret|password|passwd|api[_-]?key|authorization|cookie)/i;
