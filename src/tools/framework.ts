@@ -64,11 +64,34 @@ export function assertStrict(schema: z.ZodType, path = 'input'): void {
       return;
     case 'pipe':
       assertStrict(def.in as z.ZodType, path);
+      assertStrict(def.out as z.ZodType, path);
+      return;
+    case 'tuple':
+      for (const [i, item] of (def.items as z.ZodType[]).entries()) assertStrict(item, `${path}[${i}]`);
+      if (def.rest) assertStrict(def.rest as z.ZodType, `${path}[...]`);
+      return;
+    case 'intersection':
+      assertStrict(def.left as z.ZodType, path);
+      assertStrict(def.right as z.ZodType, path);
+      return;
+    case 'record': case 'map':
+      assertStrict(def.keyType as z.ZodType, `${path}{key}`);
+      assertStrict(def.valueType as z.ZodType, `${path}{}`);
+      return;
+    case 'set':
+      assertStrict(def.valueType as z.ZodType, `${path}{}`);
       return;
     default:
-      return;
+      // Leaves hold no objects. Anything else (lazy, promise, function, a future container) can't be checked, so it's refused.
+      if (LEAF_TYPES.has(def.type)) return;
+      throw new Error(`${path} uses a ${def.type} schema, which strictness can't be checked through; use plain strict objects`);
   }
 }
+
+const LEAF_TYPES = new Set([
+  'string', 'number', 'int', 'bigint', 'boolean', 'date', 'symbol', 'null', 'undefined', 'void', 'never', 'any', 'unknown',
+  'nan', 'literal', 'enum', 'template_literal', 'file', 'custom', 'transform', 'success',
+]);
 
 const text = (value: unknown, isError = false): CallToolResult =>
   ({ content: [{ type: 'text', text: JSON.stringify(value) }], ...(isError ? { isError: true } : {}) });
@@ -95,7 +118,15 @@ export function defineReadTool<S extends ToolInput>(spec: ReadToolSpec<S>): Defi
       const audit = (tx: AppTx, args: unknown, errorCode: string | null) => writeAudit(tx, {
         actor: caller.actor, role: caller.role, tool: spec.name, args, outcome: errorCode ? 'error' : 'ok', startedAt, correlationId, errorCode,
       });
-      const parsed = spec.input.safeParse(raw ?? {});
+      let parsed: z.ZodSafeParseResult<z.output<S>>;
+      try {
+        // Async, so schemas with async refinements or transforms parse instead of throwing.
+        parsed = await spec.input.safeParseAsync(raw ?? {});
+      } catch (e) {
+        console.error(`[${correlationId}]`, e);
+        await inAppTx(db, (tx) => audit(tx, raw, 'internal_error'));
+        return text({ error: 'internal_error', message: 'internal error', correlationId }, true);
+      }
       if (!parsed.success) {
         await inAppTx(db, (tx) => audit(tx, raw, 'invalid_args'));
         return text({ error: 'invalid_args', message: 'invalid arguments', issues: publicIssues(parsed.error.issues), correlationId }, true);

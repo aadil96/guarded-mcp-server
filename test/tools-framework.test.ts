@@ -38,6 +38,18 @@ describe('strictness is enforced when a tool is defined', () => {
   });
 });
 
+describe('strictness reaches every container', () => {
+  it('rejects a non-strict object behind intersection, tuple, record, set or pipe, and refuses lazy', () => {
+    const loose = z.object({ a: z.string() });
+    const strict = z.strictObject({ a: z.string() });
+    for (const inner of [z.intersection(strict, loose), z.tuple([z.string(), loose]), z.tuple([z.string()], loose), z.record(z.string(), loose), z.set(loose), z.string().pipe(z.any()).pipe(loose as never)]) {
+      expect(() => assertStrict(z.strictObject({ x: inner as z.ZodType }))).toThrow(/must be a strict object/);
+    }
+    expect(() => assertStrict(z.strictObject({ x: z.lazy(() => strict) }))).toThrow(/lazy schema/);
+    expect(() => assertStrict(z.strictObject({ x: z.intersection(strict, z.strictObject({ b: z.number() })), t: z.tuple([strict]), r: z.record(z.string(), strict) }))).not.toThrow();
+  });
+});
+
 describe('registration only through the framework', () => {
   it('createServer refuses a tool not built by defineReadTool/defineWriteTool, and duplicate names', () => {
     const forged = { name: 'forged', kind: 'read', description: 'x', inputSchema: z.strictObject({}), annotations: {}, call: async () => ({ content: [] }) };
@@ -199,6 +211,15 @@ describe('read tool failures are audited in the same transaction', () => {
       try {
         expect(await c2.call('big', {})).toMatchObject({ isError: true, data: { error: 'internal_error' } });
       } finally { await c2.close(); }
+      // An async refinement parses instead of throwing; the valid call and the rejected one each leave one audit row.
+      const asyncTool = defineReadTool({ name: 'async_ref', description: 'async refine', input: z.strictObject({ q: z.string().refine(async (v) => v === 'ok') }), run: async () => ({ ok: true }) });
+      const c3 = await mcpClient(db, { actor: 'r', role: 'reader' }, [asyncTool]);
+      try {
+        expect(await c3.call('async_ref', { q: 'ok' })).toMatchObject({ isError: false, data: { ok: true } });
+        expect(await c3.call('async_ref', { q: 'no' })).toMatchObject({ isError: true });
+      } finally { await c3.close(); }
+      const asyncRows = (await ctx.client.query<{ outcome: string }>(`select outcome from audit_events where tool = 'async_ref' order by created_at`)).rows;
+      expect(asyncRows.map((r) => r.outcome)).toEqual(['ok', 'error']);
       const bigRows = (await ctx.client.query<{ tool: string; error_code: string | null }>(`select tool, error_code from audit_events where tool = 'big'`)).rows;
       expect(bigRows).toEqual([{ tool: 'big', error_code: 'internal_error' }]);
     } finally {
