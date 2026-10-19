@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { argsHash } from '../db/args-hash.js';
 import { type ApprovalsConfig, defaultApprovalsConfig } from './config.js';
-import { LONE_SURROGATE, writeAudit } from './audit.js';
+import { jsonbSafeString, jsonSafe, LONE_SURROGATE, toJsonb, writeAudit } from './audit.js';
 import { issueRefund } from './refund.js';
 import type {
   Approval, Caller, Role, Db, ExecuteResult, HandlerMap, RequestWriteResult, ResolveResult, Sql, WriteTool,
@@ -231,15 +231,18 @@ export async function executeApproval(
       outcome = { ok: false, error: e instanceof Error ? e.message.slice(0, 200) : 'executor_error' };
     }
     if (!outcome.ok) await tx.query('rollback to savepoint exec_tool');
-    const result = outcome.ok ? outcome.result : { error: outcome.error };
+    // Handler output is untrusted shape: make it jsonb-safe (bigint, cycles, NUL, lone surrogates) so the
+    // status claim and its audit row always commit instead of rolling back and leaving it 'approved'.
+    const error = outcome.ok ? '' : jsonbSafeString(typeof outcome.error === 'string' ? outcome.error : String(outcome.error)).slice(0, 200);
+    const result = outcome.ok ? jsonSafe(outcome.result) : { error };
     const claimed = await tx.query<Approval>(
       `update approvals set status = $2, result = $3, executed_at = now() where id = $1 and status = 'approved' returning *`,
-      [approvalId, outcome.ok ? 'executed' : 'failed', JSON.stringify(result)],
+      [approvalId, outcome.ok ? 'executed' : 'failed', toJsonb(result)],
     );
     if (!claimed.rows[0]) throw new Error('approval claim lost despite row lock');
     return outcome.ok
       ? finish({ kind: 'executed', approvalId, result }, claimed.rows[0])
-      : finish({ kind: 'failed', approvalId, error: outcome.error }, claimed.rows[0]);
+      : finish({ kind: 'failed', approvalId, error }, claimed.rows[0]);
   });
 }
 

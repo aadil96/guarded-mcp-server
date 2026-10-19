@@ -17,7 +17,7 @@ const MAX_DEPTH = 8;
 const MAX_KEYS = 100;
 const MAX_NODES = 2000;
 
-type Walk = { path: WeakSet<object>; budget: number };
+type Walk = { path: WeakSet<object>; budget: number; redact: boolean; truncate: boolean };
 
 /**
  * Redact and make JSON-safe in one bounded pass: runtime-rejected input may hold bigints,
@@ -25,8 +25,27 @@ type Walk = { path: WeakSet<object>; budget: number };
  * A global node budget bounds total work even for shared-reference graphs.
  */
 export function redact(value: unknown): unknown {
-  return walk(value, 0, { path: new WeakSet(), budget: MAX_NODES });
+  return walk(value, 0, { path: new WeakSet(), budget: MAX_NODES, redact: true, truncate: true });
 }
+
+/**
+ * The same bounded JSON-safe pass without redaction or string truncation, for values that are
+ * persisted as data (handler results) rather than as an audit record.
+ */
+export function jsonSafe(value: unknown): unknown {
+  return walk(value, 0, { path: new WeakSet(), budget: MAX_NODES, redact: false, truncate: false });
+}
+
+/** JSON text Postgres jsonb will accept for any value; never throws. */
+export function toJsonb(value: unknown): string {
+  try {
+    return JSON.stringify(jsonSafe(value)) ?? 'null';
+  } catch {
+    return JSON.stringify('[unserializable]');
+  }
+}
+
+export const jsonbSafeString = (s: string) => jsonbSafe(s);
 
 function walk(value: unknown, depth: number, w: Walk): unknown {
   if (w.budget <= 0) return '[truncated]';
@@ -35,7 +54,7 @@ function walk(value: unknown, depth: number, w: Walk): unknown {
   if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
   if (typeof value === 'bigint') return `${value.toString()}n`;
   if (typeof value === 'string') {
-    const v = value.length > 200 ? `${value.slice(0, 200)}…` : value;
+    const v = w.truncate && value.length > 200 ? `${value.slice(0, 200)}…` : value;
     return jsonbSafe(v);
   }
   if (typeof value === 'undefined') return null;
@@ -51,7 +70,7 @@ function walk(value: unknown, depth: number, w: Walk): unknown {
       if (w.budget <= 0) { out['…'] = '[truncated]'; break; }
       let v: unknown;
       try { v = (value as Record<string, unknown>)[k]; } catch { v = '[unreadable]'; }
-      out[uniqueKey(out, jsonbSafe(k))] = SENSITIVE.test(k) ? '[redacted]' : walk(v, depth + 1, w);
+      out[uniqueKey(out, jsonbSafe(k))] = w.redact && SENSITIVE.test(k) ? '[redacted]' : walk(v, depth + 1, w);
     }
     return out;
   } finally {

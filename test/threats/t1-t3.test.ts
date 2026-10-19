@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApprovals, type Db, executeApproval, loadApprovalsConfig, requestWrite, resolveApproval } from '../../src/approvals/index.js';
+import { createApprovals, type Db, defaultHandlers, type HandlerMap, executeApproval, loadApprovalsConfig, requestWrite, resolveApproval } from '../../src/approvals/index.js';
 import { seed, seedId } from '../../src/db/seed.js';
 import { approvalsDb } from '../approvals-db.js';
 import { freshDb } from '../helpers.js';
@@ -545,5 +545,31 @@ describe('runtime input hardening (Codex re-review)', () => {
     expect(r.kind).toBe('invalid_args');
     expect(await n('approvals')).toBe(approvalsBefore);
     expect(await n('audit_events')).toBe(auditBefore + 1);
+  });
+
+  it('unsafe handler results and errors are persisted JSON-safe: executed/failed + audit always commit', async () => {
+    const inv = await sharedInv();
+    const base = defaultHandlers.issue_refund as NonNullable<HandlerMap['issue_refund']>;
+    const cyclic: Record<string, unknown> = { big: 12345678901234567890n, nul: 'a\u0000b', lone: 'c\uD800' };
+    cyclic.self = cyclic;
+    const variants: [string, HandlerMap['issue_refund'], 'executed' | 'failed'][] = [
+      ['result', { ...base, execute: async () => ({ ok: true, result: cyclic }) }, 'executed'],
+      ['returned-error', { ...base, execute: async () => ({ ok: false, error: 'bad\u0000\uDC00' }) }, 'failed'],
+      ['thrown-error', { ...base, execute: async () => { throw new Error('boom\u0000\uD800'); } }, 'failed'],
+    ];
+    for (const [label, handler, want] of variants) {
+      const handlers: HandlerMap = { issue_refund: handler };
+      const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 113), idempotencyKey: `unsafe-out-${label}` }, handlers);
+      if (r.kind !== 'pending') throw new Error(r.kind);
+      await resolveApproval(db, { ...admin, approvalId: r.approvalId, decision: 'approve' });
+      const ex = await executeApproval(db, r.approvalId, admin, handlers);
+      expect(ex.kind).toBe(want);
+      const row = await ctx.client.query<{ status: string; result: Record<string, unknown> }>('select status, result from approvals where id = $1', [r.approvalId]);
+      expect(row.rows[0].status).toBe(want);
+      const a = await lastAudit();
+      expect(a).toMatchObject({ approval_id: r.approvalId, outcome: want === 'executed' ? 'ok' : 'error' });
+      if (label === 'result') expect(row.rows[0].result).toMatchObject({ big: '12345678901234567890n', nul: 'a\uFFFDb', lone: 'c\uFFFD', self: '[circular]' });
+      else expect(JSON.stringify(row.rows[0].result)).not.toMatch(/\\u0000/);
+    }
   });
 });
