@@ -42,10 +42,13 @@ describe('strictness reaches every container', () => {
   it('rejects a non-strict object behind intersection, tuple, record, set or pipe, and refuses lazy', () => {
     const loose = z.object({ a: z.string() });
     const strict = z.strictObject({ a: z.string() });
-    for (const inner of [z.intersection(strict, loose), z.tuple([z.string(), loose]), z.tuple([z.string()], loose), z.record(z.string(), loose), z.set(loose), z.string().pipe(z.any()).pipe(loose as never)]) {
+    for (const inner of [z.intersection(strict, loose), z.tuple([z.string(), loose]), z.tuple([z.string()], loose), z.record(z.string(), loose), z.set(loose), strict.pipe(loose as never)]) {
       expect(() => assertStrict(z.strictObject({ x: inner as z.ZodType }))).toThrow(/must be a strict object/);
     }
     expect(() => assertStrict(z.strictObject({ x: z.lazy(() => strict) }))).toThrow(/lazy schema/);
+    for (const permissive of [z.any(), z.unknown(), z.custom<object>(() => true)]) {
+      expect(() => assertStrict(z.strictObject({ payload: permissive }))).toThrow(/schema, which strictness can't be checked/);
+    }
     expect(() => assertStrict(z.strictObject({ x: z.intersection(strict, z.strictObject({ b: z.number() })), t: z.tuple([strict]), r: z.record(z.string(), strict) }))).not.toThrow();
   });
 });
@@ -244,6 +247,12 @@ describe('read tool failures are audited in the same transaction', () => {
       } finally { await c3.close(); }
       const asyncRows = (await ctx.client.query<{ outcome: string }>(`select outcome from audit_events where tool = 'async_ref' order by created_at`)).rows;
       expect(asyncRows.map((r) => r.outcome)).toEqual(['ok', 'error']);
+      const undef = defineReadTool({ name: 'undef', description: 'returns undefined', input: z.strictObject({}), run: async () => undefined });
+      const c4 = await mcpClient(db, { actor: 'r', role: 'reader' }, [undef]);
+      try {
+        expect(await c4.call('undef', {})).toMatchObject({ isError: true, data: { error: 'internal_error' } });
+      } finally { await c4.close(); }
+      expect((await ctx.client.query(`select error_code from audit_events where tool = 'undef'`)).rows).toEqual([{ error_code: 'internal_error' }]);
       const bigRows = (await ctx.client.query<{ tool: string; error_code: string | null }>(`select tool, error_code from audit_events where tool = 'big'`)).rows;
       expect(bigRows).toEqual([{ tool: 'big', error_code: 'internal_error' }]);
     } finally {

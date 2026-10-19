@@ -93,8 +93,9 @@ export function assertStrict(schema: z.ZodType, path = 'input'): void {
 }
 
 const LEAF_TYPES = new Set([
-  'string', 'number', 'int', 'bigint', 'boolean', 'date', 'symbol', 'null', 'undefined', 'void', 'never', 'any', 'unknown',
-  'nan', 'literal', 'enum', 'template_literal', 'file', 'custom', 'success',
+  // Not any, unknown or custom: they accept arbitrary objects, so unknown keys would pass through unchecked.
+  'string', 'number', 'int', 'bigint', 'boolean', 'date', 'symbol', 'null', 'undefined', 'void', 'never',
+  'nan', 'literal', 'enum', 'template_literal', 'file', 'success',
 ]);
 
 const text = (value: unknown, isError = false): CallToolResult =>
@@ -141,6 +142,8 @@ export function defineReadTool<S extends ToolInput>(spec: ReadToolSpec<S>): Defi
           const data = await tx.transaction((inner) => spec.run(inner as unknown as AppTx, parsed.data));
           // Serialise first: a value JSON can't encode (bigint, cycle) must fail before the success audit is written.
           const result = text(data);
+          // JSON.stringify returns undefined (no throw) for undefined, functions and symbols: not a valid text item.
+          if (typeof (result.content[0] as { text?: unknown }).text !== 'string') throw new Error('tool result is not JSON-serialisable');
           await audit(tx, parsed.data, null);
           return result;
         } catch (e) {
