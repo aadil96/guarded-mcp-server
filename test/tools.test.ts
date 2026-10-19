@@ -5,42 +5,20 @@ import type { AppDb } from '../src/db/types.js';
 import { AuditTracker, auditingTransport } from '../src/audit/transport.js';
 import { createServer } from '../src/server.js';
 import { escapeLike } from '../src/tools/read.js';
-import { freshDb } from './helpers.js';
+import { freshDb, mcpClient } from './helpers.js';
 
 type Ctx = Awaited<ReturnType<typeof freshDb>>;
 let ctx: Ctx;
 const caller = { actor: 'test-actor', role: 'reader' as const };
 const auditCount = async () => (await ctx.client.query<{ n: number }>('select count(*)::int n from audit_events')).rows[0].n;
 
-let rpc: (name: string, args: unknown) => Promise<{ isError: boolean; data: any }>;
+let rpc: (name: string, args?: unknown) => Promise<Awaited<ReturnType<Awaited<ReturnType<typeof mcpClient>>['call']>>>;
 
 beforeAll(async () => {
   ctx = await freshDb();
   await seed(ctx.db);
-  // Spin up an in-memory MCP server once for the file.
-  const [clientT, serverT] = InMemoryTransport.createLinkedPair();
-  const tracker = new AuditTracker();
-  const db = ctx.db as unknown as AppDb;
-  await createServer(db, caller, tracker).connect(auditingTransport(serverT, db, caller, tracker));
-  const pending = new Map<number, (m: JSONRPCMessage) => void>();
-  clientT.onmessage = (m) => { if ('id' in m && typeof m.id === 'number') pending.get(m.id)?.(m); };
-  await clientT.start();
-  let id = 0;
-  const send = (method: string, params: unknown) => new Promise<Record<string, unknown>>((res) => {
-    const n = ++id;
-    pending.set(n, res as (m: JSONRPCMessage) => void);
-    clientT.send({ jsonrpc: '2.0', id: n, method, params } as JSONRPCMessage);
-  }).then((m) => (m as { result: Record<string, unknown> }).result);
-  await send('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
-  await clientT.send({ jsonrpc: '2.0', method: 'notifications/initialized' } as JSONRPCMessage);
-  rpc = async (name: string, args: unknown = {}) => {
-    const r = await send('tools/call', { name, arguments: args });
-    const isError = (r as { isError?: boolean }).isError === true;
-    const text = ((r as { content?: { text: string }[] }).content ?? [])[0]?.text ?? 'null';
-    let data: any;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-    return { isError, data };
-  };
+  const cli = await mcpClient(ctx.db as unknown as AppDb, caller);
+  rpc = (name, args = {}) => cli.call(name, args);
 });
 
 let before = 0;

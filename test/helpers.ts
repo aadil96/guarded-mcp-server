@@ -64,3 +64,62 @@ export async function startServer(env: Record<string, string>) {
   const [code] = (await once(child, 'exit')) as [number | null];
   return { code, stderr };
 }
+
+/** An MCP client wired to createServer over an in-memory transport, with the audit transport hook in place. */
+export async function mcpClient(
+  db: import('../src/db/types.js').AppDb,
+  caller: import('../src/audit/log.js').Caller,
+  tools?: readonly import('../src/tools/framework.js').DefinedTool[],
+) {
+  const { InMemoryTransport } = await import('@modelcontextprotocol/server');
+  const { AuditTracker, auditingTransport } = await import('../src/audit/transport.js');
+  const { createServer } = await import('../src/server.js');
+  const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+  const tracker = new AuditTracker();
+  await createServer(db, caller, tracker, tools).connect(auditingTransport(serverT, db, caller, tracker));
+  type Msg = { id?: number; result?: Record<string, unknown>; error?: { code: number; message: string } };
+  const pending = new Map<number, (m: Msg) => void>();
+  clientT.onmessage = (m) => { const msg = m as Msg; if (typeof msg.id === 'number') pending.get(msg.id)?.(msg); };
+  await clientT.start();
+  let id = 0;
+  const send = (method: string, params: unknown) => new Promise<Msg>((res) => {
+    const n = ++id;
+    pending.set(n, res);
+    void clientT.send({ jsonrpc: '2.0', id: n, method, params } as never);
+  });
+  await send('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
+  await clientT.send({ jsonrpc: '2.0', method: 'notifications/initialized' } as never);
+  return {
+    send,
+    async list() { return ((await send('tools/list', {})).result?.tools ?? []) as { name: string; inputSchema: unknown; annotations: Record<string, boolean> }[]; },
+    /** isError is true for tool errors and JSON-RPC errors; data is the parsed text content when it is JSON. */
+    async call(name: string, args: unknown) {
+      const m = await send('tools/call', { name, arguments: args });
+      if (m.error) return { isError: true, data: { rpcError: m.error }, raw: m };
+      const r = m.result as { isError?: boolean; content?: { type: string; text: string }[] };
+      const txt = r.content?.[0]?.text ?? 'null';
+      // biome-ignore lint/suspicious/noExplicitAny: parsed tool output, asserted field by field in tests
+      let data: any;
+      try { data = JSON.parse(txt); } catch { data = { text: txt }; }
+      return { isError: r.isError === true, data, raw: m };
+    },
+    close: () => clientT.close(),
+  };
+}
+
+/** Same AppDb, but any audit insert inside a transaction fails, to prove the business write rolls back with it. */
+export function auditFailing(inner: import('../src/db/types.js').AppDb) {
+  type AppDb = import('../src/db/types.js').AppDb;
+  type AppTx = import('../src/db/types.js').AppTx;
+  const wrapped = Object.create(inner) as AppDb;
+  wrapped.transaction = ((fn: (tx: AppTx) => Promise<unknown>) => inner.transaction(async (tx) => {
+    const { auditEvents } = await import('../src/db/schema.js');
+    const failing = Object.create(tx) as AppTx;
+    failing.insert = ((table: unknown) => {
+      if (table === auditEvents) throw new Error('forced audit failure');
+      return tx.insert(table as typeof auditEvents);
+    }) as AppTx['insert'];
+    return fn(failing);
+  })) as AppDb['transaction'];
+  return wrapped;
+}

@@ -3,9 +3,8 @@ import { createApprovals, defaultHandlers, type HandlerMap, executeApproval, loa
 import { seed, seedId } from '../../src/db/seed.js';
 import { sql } from 'drizzle-orm';
 import { closeAppDb, connectAsApp, queryRows } from '../../src/db/index.js';
-import { auditEvents } from '../../src/db/schema.js';
-import type { AppDb, AppTx } from '../../src/db/types.js';
-import { freshDb } from '../helpers.js';
+import type { AppDb } from '../../src/db/types.js';
+import { auditFailing, freshDb } from '../helpers.js';
 
 let ctx: Awaited<ReturnType<typeof freshDb>>;
 let db: AppDb;
@@ -280,19 +279,6 @@ describe('audit', () => {
   });
 });
 
-/** Same AppDb, but any audit insert inside a transaction fails, to prove the business write rolls back with it. */
-const auditFailing = (inner: AppDb): AppDb => {
-  const wrapped = Object.create(inner) as AppDb;
-  wrapped.transaction = ((fn: (tx: AppTx) => Promise<unknown>) => inner.transaction((tx) => {
-    const failing = Object.create(tx) as AppTx;
-    failing.insert = ((table: unknown) => {
-      if (table === auditEvents) throw new Error('forced audit failure');
-      return tx.insert(table as typeof auditEvents);
-    }) as AppTx['insert'];
-    return fn(failing);
-  })) as AppDb['transaction'];
-  return wrapped;
-};
 
 describe('audit atomicity (Codex P1/P2)', () => {
   it('requestWrite: forced audit failure rolls back the approval insert', async () => {

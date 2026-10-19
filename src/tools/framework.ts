@@ -1,91 +1,209 @@
-import type { ServerContext } from '@modelcontextprotocol/server';
-import type { Transport } from '@modelcontextprotocol/server';
-import { McpServer } from '@modelcontextprotocol/server';
-import type * as z from 'zod';
 import { randomUUID } from 'node:crypto';
-import { inAppTx } from '../db/index.js';
-import type { AppDb, AppTx } from '../db/types.js';
+import type { CallToolResult, McpServer, ServerContext } from '@modelcontextprotocol/server';
+import * as z from 'zod';
+import { requestWrite } from '../approvals/index.js';
+import type { Approval, HandlerMap, HandlerOutcome, RequestWriteResult, ToolHandler, WriteTool } from '../approvals/types.js';
 import { type Caller, writeAudit } from '../audit/log.js';
-import { AuditTracker } from '../audit/transport.js';
+import type { AuditTracker } from '../audit/transport.js';
+import { inAppTx } from '../db/index.js';
+import type { AppDb, AppQueryable, AppTx } from '../db/types.js';
 
-// Strict Zod object guard: helper accepts only strict schemas.
-export type StrictZodObject = z.ZodObject<any>;
+/**
+ * The only module that registers MCP tools (scripts/check-mcp-register.mjs enforces it). Tools are built with
+ * defineReadTool / defineWriteTool; the framework owns strict parsing, audit, the transaction and result
+ * mapping. Handlers only see parsed args and a transaction handle.
+ */
 
-export type ReadToolDef<S extends StrictZodObject> = {
+// biome-ignore lint/suspicious/noExplicitAny: any shape; strictness is checked at runtime by assertStrict
+export type ToolInput = z.ZodObject<any>;
+
+/** Thrown by read handlers for expected failures; the code is audited and returned, the message is shown. */
+export class ToolError extends Error {
+  constructor(public code: string, message: string) { super(message); }
+}
+
+type Deps = { db: AppDb; caller: Caller; tracker: AuditTracker };
+const toolBrand: unique symbol = Symbol('tool');
+
+/** An MCP tool built by defineReadTool or defineWriteTool. Not constructible elsewhere. */
+export type DefinedTool = {
+  readonly [toolBrand]: true;
+  readonly name: string;
+  readonly kind: 'read' | 'write';
+  readonly description: string;
+  readonly inputSchema: ToolInput;
+  readonly annotations: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
+  readonly call: (deps: Deps, raw: unknown) => Promise<CallToolResult>;
+  /** Write tools only: the approvals handler executeApproval runs once the request is approved. */
+  readonly approvalHandler?: ToolHandler;
+};
+
+/**
+ * Strictness is a property of the schema, enforced when a tool is defined: every object, at any depth, must
+ * reject unknown keys. zod's $strict and $strip config types are structurally identical, so this can't be a
+ * type constraint; a non-strict schema throws at module load instead.
+ */
+export function assertStrict(schema: z.ZodType, path = 'input'): void {
+  const def = (schema as unknown as { _zod: { def: Record<string, unknown> & { type: string } } })._zod.def;
+  switch (def.type) {
+    case 'object': {
+      const catchall = def.catchall as z.ZodType | undefined;
+      const strict = catchall !== undefined && (catchall as unknown as { _zod: { def: { type: string } } })._zod.def.type === 'never';
+      if (!strict) throw new Error(`${path} must be a strict object (z.strictObject or .strict()) so unknown keys are rejected`);
+      for (const [k, v] of Object.entries(def.shape as Record<string, z.ZodType>)) assertStrict(v, `${path}.${k}`);
+      return;
+    }
+    case 'optional': case 'nullable': case 'default': case 'prefault': case 'readonly': case 'nonoptional': case 'catch':
+      assertStrict(def.innerType as z.ZodType, path);
+      return;
+    case 'array':
+      assertStrict(def.element as z.ZodType, `${path}[]`);
+      return;
+    case 'union':
+      for (const [i, o] of (def.options as z.ZodType[]).entries()) assertStrict(o, `${path}|${i}`);
+      return;
+    case 'pipe':
+      assertStrict(def.in as z.ZodType, path);
+      return;
+    default:
+      return;
+  }
+}
+
+const text = (value: unknown, isError = false): CallToolResult =>
+  ({ content: [{ type: 'text', text: JSON.stringify(value) }], ...(isError ? { isError: true } : {}) });
+
+export type ReadToolSpec<S extends ToolInput> = {
   name: string;
   description: string;
   input: S;
-  run: (tx: AppTx, args: z.infer<S>) => Promise<unknown>;
+  run: (tx: AppTx, args: z.output<S>) => Promise<unknown>;
 };
 
-const readRegistry: ReadToolDef<StrictZodObject>[] = [];
-
-export function defineReadTool<S extends StrictZodObject>(def: ReadToolDef<S>): ReadToolDef<S> {
-  readRegistry.push(def as ReadToolDef<StrictZodObject>);
-  return def;
-}
-
-// Register all read tools on an MCP server. The helper owns parsing, tx, and audit.
-export function registerReadTools(server: McpServer, db: AppDb, caller: Caller, tracker: AuditTracker) {
-  for (const tool of readRegistry) {
-    server.registerTool(tool.name, {
-      description: tool.description,
-      inputSchema: tool.input,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    }, async (raw: unknown, ctx: ServerContext) => {
-      tracker.markHandled(ctx.mcpReq.id);
+export function defineReadTool<S extends ToolInput>(spec: ReadToolSpec<S>): DefinedTool {
+  assertStrict(spec.input, `${spec.name}.input`);
+  return Object.freeze({
+    [toolBrand]: true as const,
+    name: spec.name,
+    kind: 'read' as const,
+    description: spec.description,
+    inputSchema: spec.input,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async call({ db, caller }: Deps, raw: unknown) {
       const startedAt = performance.now();
       const correlationId = randomUUID();
-      try {
-        // Parse strictly at boundary.
-        const args = tool.input.parse(raw);
-        // Run inside a tx; write audit in the same tx.
-        const outcome = await inAppTx(db, async (tx) => {
-          try {
-            const data = await tool.run(tx, args as never);
-            await writeAudit(tx, { actor: caller.actor, role: caller.role, tool: tool.name, args, outcome: 'ok', startedAt, correlationId, errorCode: null });
-            return { ok: true as const, data };
-          } catch (e) {
-            const code = (e as any)?.code === 'not_found' ? 'not_found' : 'internal_error';
-            await writeAudit(tx, { actor: caller.actor, role: caller.role, tool: tool.name, args, outcome: 'error', startedAt, correlationId, errorCode: code });
-            return { ok: false as const, code };
-          }
-        });
-        if (outcome.ok) return { content: [{ type: 'text' as const, text: JSON.stringify(outcome.data) }] };
-        return { isError: true as const, content: [{ type: 'text' as const, text: JSON.stringify({ error: outcome.code, correlationId }) }] };
-      } catch {
-        // SDK-level rejections are audited by the transport wrapper.
-        return { isError: true as const, content: [{ type: 'text' as const, text: JSON.stringify({ error: 'invalid_args' }) }] };
+      const audit = (tx: AppTx, args: unknown, errorCode: string | null) => writeAudit(tx, {
+        actor: caller.actor, role: caller.role, tool: spec.name, args, outcome: errorCode ? 'error' : 'ok', startedAt, correlationId, errorCode,
+      });
+      const parsed = spec.input.safeParse(raw ?? {});
+      if (!parsed.success) {
+        await inAppTx(db, (tx) => audit(tx, raw, 'invalid_args'));
+        return text({ error: 'invalid_args', message: 'invalid arguments', issues: parsed.error.issues, correlationId }, true);
       }
+      return inAppTx(db, async (tx) => {
+        try {
+          // A savepoint, so a failed query doesn't abort the transaction the audit row is written in.
+          const data = await tx.transaction((inner) => spec.run(inner as unknown as AppTx, parsed.data));
+          await audit(tx, parsed.data, null);
+          return text(data);
+        } catch (e) {
+          const known = e instanceof ToolError;
+          if (!known) console.error(`[${correlationId}]`, e);
+          await audit(tx, parsed.data, known ? e.code : 'internal_error');
+          return text({ error: known ? e.code : 'internal_error', message: known ? e.message : 'internal error', correlationId }, true);
+        }
+      });
+    },
+  });
+}
+
+export const IDEMPOTENCY_KEY = 'idempotency_key';
+
+export type WriteToolSpec<S extends ToolInput> = {
+  name: WriteTool;
+  description: string;
+  /** The tool's own arguments; the framework adds idempotency_key to the MCP input schema. */
+  input: S;
+  /** Human-readable summary shown to the approver and returned while pending. */
+  summarize: (db: AppQueryable, args: z.output<S>) => Promise<string>;
+  /** Runs after approval, inside the transaction that claims the approval. */
+  execute: (tx: AppTx, args: z.output<S>, approval: Approval) => Promise<HandlerOutcome>;
+  destructive?: boolean;
+};
+
+function assertNever(x: never): never {
+  throw new Error(`unhandled approvals outcome: ${JSON.stringify(x)}`);
+}
+
+/** Total mapping from the approvals module's result to an MCP tool result. Keeps every field a caller needs. */
+export function mapRequestWriteResult(r: RequestWriteResult): CallToolResult {
+  switch (r.kind) {
+    case 'pending':
+      return text({ status: 'pending_approval', approvalId: r.approvalId, summary: r.summary });
+    case 'duplicate':
+      return text({ status: 'duplicate', approvalId: r.approvalId, approvalStatus: r.status, result: r.result }, r.status !== 'executed');
+    case 'conflict':
+      return text({ error: 'conflict', reason: 'idempotency_key_reused', approvalId: r.approvalId }, true);
+    case 'denied':
+      return text({ error: 'denied', reason: r.reason }, true);
+    case 'invalid_args':
+      return text({ error: 'invalid_args', issues: r.issues }, true);
+    default:
+      return assertNever(r);
+  }
+}
+
+export function defineWriteTool<S extends ToolInput>(spec: WriteToolSpec<S>): DefinedTool {
+  assertStrict(spec.input, `${spec.name}.input`);
+  if (IDEMPOTENCY_KEY in spec.input.shape) throw new Error(`${spec.name}.input must not declare ${IDEMPOTENCY_KEY}; the framework adds it`);
+  // The approvals module enforces the 200-byte cap and audits a bad key; the schema mirrors it for tools/list.
+  const inputSchema = spec.input.extend({ [IDEMPOTENCY_KEY]: z.string().min(1).max(200) }).strict();
+  const handler: ToolHandler = {
+    schema: spec.input as unknown as z.ZodType<Record<string, unknown>>,
+    summarize: (db: AppQueryable, args: Record<string, unknown>) => spec.summarize(db, args as z.output<S>),
+    execute: (tx: AppTx, approval: Approval) => {
+      const args = spec.input.safeParse(approval.arguments);
+      if (!args.success) return Promise.resolve<HandlerOutcome>({ ok: false, error: 'stored_arguments_invalid' });
+      return spec.execute(tx, args.data, approval);
+    },
+  };
+  return Object.freeze({
+    [toolBrand]: true as const,
+    name: spec.name,
+    kind: 'write' as const,
+    description: spec.description,
+    inputSchema,
+    approvalHandler: handler,
+    annotations: { readOnlyHint: false, destructiveHint: spec.destructive ?? true, idempotentHint: true, openWorldHint: false },
+    async call({ db, caller }: Deps, raw: unknown) {
+      const { [IDEMPOTENCY_KEY]: key, ...args } = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+      // requestWrite parses args strictly, checks the key and writes exactly one audit row in a transaction.
+      const r = await requestWrite(db, { ...caller, tool: spec.name, args, idempotencyKey: key as string }, { [spec.name]: handler });
+      return mapRequestWriteResult(r);
+    },
+  });
+}
+
+/** The approvals handlers for a tool list, for executeApproval: the same code the MCP request was validated by. */
+export function approvalHandlers(tools: readonly DefinedTool[]): HandlerMap {
+  const map: HandlerMap = {};
+  for (const t of tools) if (t.kind === 'write' && t.approvalHandler) map[t.name as WriteTool] = t.approvalHandler;
+  return map;
+}
+
+/** Registers tools on a server. The only registerTool call in the codebase. */
+export function registerTools(server: McpServer, deps: Deps, tools: readonly DefinedTool[]): void {
+  const seen = new Set<string>();
+  for (const tool of tools) {
+    if (tool[toolBrand] !== true) throw new Error('tools must be built with defineReadTool or defineWriteTool');
+    if (seen.has(tool.name)) throw new Error(`duplicate tool name ${tool.name}`);
+    seen.add(tool.name);
+    server.registerTool(tool.name, {
+      description: tool.description, inputSchema: tool.inputSchema, annotations: tool.annotations,
+    }, async (raw: unknown, ctx: ServerContext) => {
+      // The handler audits from here on; the transport hook only audits calls the SDK rejected first.
+      deps.tracker.markHandled(ctx.mcpReq.id);
+      return tool.call(deps, raw);
     });
   }
 }
-
-// -- Write tools scaffolding --
-export type WriteToolSummaryHook<A> = (args: A) => string;
-
-export type WriteOutcome =
-  | { kind: 'pending'; summary: string }
-  | { kind: 'duplicate'; result: unknown }
-  | { kind: 'conflict' }
-  | { kind: 'denied' }
-  | { kind: 'invalid_args' };
-
-export function mapApprovalOutcomeToMcp(outcome: WriteOutcome) {
-  switch (outcome.kind) {
-    case 'pending':
-      return { isError: false as const, content: [{ type: 'input' as const, text: outcome.summary }] };
-    case 'duplicate':
-      return { isError: false as const, content: [{ type: 'text' as const, text: JSON.stringify(outcome.result) }] };
-    case 'conflict':
-    case 'denied':
-      return { isError: true as const, content: [{ type: 'text' as const, text: JSON.stringify({ error: outcome.kind }) }] };
-    case 'invalid_args':
-      return { isError: true as const, content: [{ type: 'text' as const, text: JSON.stringify({ error: 'invalid_args' }) }] };
-    default: {
-      const _exhaustive: never = outcome;
-      return _exhaustive;
-    }
-  }
-}
-

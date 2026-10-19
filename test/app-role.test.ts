@@ -8,7 +8,6 @@ import type { AppDb } from '../src/db/types.js';
 import { createServer } from '../src/server.js';
 import { AuditTracker, auditingTransport } from '../src/audit/transport.js';
 import { InMemoryTransport, type JSONRPCMessage } from '@modelcontextprotocol/server';
-import './tools.test'; // reuse side effects; not importing types
 import { freshDb, startServer } from './helpers.js';
 
 // The server's own db handle: on real PG (CI) the production connectAsApp(); on PGlite the
