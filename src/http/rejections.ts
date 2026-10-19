@@ -7,7 +7,7 @@ import type { AppDb } from '../db/types.js';
 export type Rejection = {
   ip: string;
   status: number;
-  errorCode: 'missing_token' | 'invalid_token' | 'invalid_host' | 'forbidden_origin' | 'body_too_large' | 'method_not_allowed';
+  errorCode: 'missing_token' | 'invalid_token' | 'invalid_host' | 'forbidden_origin' | 'body_too_large';
   /** The authenticated caller, for refusals after the token check; absent before it. */
   caller?: Pick<TokenCaller, 'actor' | 'role'>;
   method: string;

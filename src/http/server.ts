@@ -99,10 +99,8 @@ export function startHttpServer(opts: HttpOptions) {
       return reject(res, { ip, method, status: 401, errorCode: auth.reason }, { error: auth.reason }, { 'www-authenticate': challenge });
     }
     const { caller } = auth;
-    // Stateless: no session to resume, so no GET stream and no DELETE.
-    if (method !== 'POST') {
-      return reject(res, { ip, method, status: 405, errorCode: 'method_not_allowed', caller }, { error: 'method_not_allowed' }, { allow: 'POST' });
-    }
+    // Stateless: no GET stream and no DELETE. The SDK client probes GET after initialize and expects this 405, so it is not audited.
+    if (method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' }, { allow: 'POST' });
     let body: Buffer;
     try {
       body = await readBody(req, maxBody);

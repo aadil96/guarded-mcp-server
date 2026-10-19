@@ -185,9 +185,12 @@ describe('HTTP transport: request guards', () => {
   });
 
   it('refuses GET and DELETE (stateless: no session streams)', async () => {
+    const before = await auditCount();
     const r = await fetch(srv.url, { method: 'GET', headers: { authorization: `Bearer ${reader.token}` } });
     expect(r.status).toBe(405);
-    expect(await lastAudit()).toMatchObject({ actor: 'reader-bot', role: 'reader', error_code: 'method_not_allowed' });
+    expect(r.headers.get('allow')).toBe('POST');
+    // The SDK client sends this GET probe on every connection, so it is not a security event.
+    expect(await auditCount()).toBe(before);
   });
 });
 
