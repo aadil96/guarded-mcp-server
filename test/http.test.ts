@@ -273,6 +273,26 @@ describe('HTTP transport: rejection limiter memory', () => {
     await auditor.close();
   });
 
+  it('close waits for an in-flight flush, so counts it restores on failure still reach the final summary', async () => {
+    let failNext: ((e: Error) => void) | undefined;
+    const flaky = new Proxy(db, {
+      get(t, p) {
+        if (p === 'transaction' && !failNext) return () => new Promise((_, reject) => { failNext = reject; });
+        const v = Reflect.get(t, p);
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    const auditor = new RejectionAuditor(flaky, { burst: 0, refillPerSecond: 0, maxTrackedIps: 10 }, () => 0);
+    await auditor.record({ ip: '10.3.0.1', status: 401, errorCode: 'invalid_token', method: 'POST' });
+    const inFlight = auditor.flush();
+    const closing = auditor.close();
+    await new Promise((r) => setTimeout(r, 20));
+    failNext?.(new Error('db blip'));
+    await expect(inFlight).rejects.toThrow('db blip');
+    await closing;
+    expect(await lastAudit()).toMatchObject({ error_code: 'rejections_dropped', arguments: { total: 1, byIp: { '10.3.0.1': 1 } } });
+  });
+
   it('counts a refusal whose own audit row fails to write, so the next flush reports it', async () => {
     let down = true;
     const flaky = new Proxy(db, {

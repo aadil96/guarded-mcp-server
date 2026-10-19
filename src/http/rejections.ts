@@ -40,6 +40,7 @@ export class RejectionAuditor {
   private readonly overflow: Bucket;
   private dropped = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | undefined;
+  private lastFlush: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly db: AppDb,
@@ -123,8 +124,17 @@ export class RejectionAuditor {
     return true;
   }
 
-  /** Writes one summary row for the rejections dropped since the last flush, if any. */
-  async flush(): Promise<number> {
+  /**
+   * Writes one summary row for the rejections dropped since the last flush, if any. Flushes run one at a time,
+   * so a flush (including the final one in close) sees counts an earlier failed flush put back.
+   */
+  flush(): Promise<number> {
+    const run = this.lastFlush.catch(() => {}).then(() => this.flushNow());
+    this.lastFlush = run;
+    return run;
+  }
+
+  private async flushNow(): Promise<number> {
     if (this.dropped.size === 0) return 0;
     const byIp = Object.fromEntries(this.dropped);
     const total = [...this.dropped.values()].reduce((a, b) => a + b, 0);
