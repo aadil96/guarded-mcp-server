@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type Db, executeApproval, type HandlerMap, requestWrite, resolveApproval } from '../src/approvals/index.js';
+import { executeApproval, type HandlerMap, requestWrite, resolveApproval } from '../src/approvals/index.js';
 import { issueRefund } from '../src/approvals/refund.js';
 import { seed } from '../src/db/seed.js';
-import { approvalsDb } from './approvals-db.js';
+import { type SQL, sql } from 'drizzle-orm';
+import { closeAppDb, connectAsApp, queryRows } from '../src/db/index.js';
+import type { AppDb } from '../src/db/types.js';
 import { freshDb } from './helpers.js';
 
 // drizzle/0003_approvals_column_grants.sql: meridian_app may UPDATE only the columns the approval
@@ -11,15 +13,15 @@ import { freshDb } from './helpers.js';
 const WRITABLE = ['executed_at', 'resolved_at', 'resolved_by', 'result', 'status'];
 
 let ctx: Awaited<ReturnType<typeof freshDb>>;
-let db: Db & { close(): Promise<void> };
+let db: AppDb;
 const op = { actor: 'op-1', role: 'operator' as const };
 const admin = { actor: 'admin-1', role: 'admin' as const };
 const used = new Set<string>();
 
 // Unique invoice for flows that execute; requests that are never executed may share one.
 async function paidInvoice(unique = true) {
-  const r = await db.query<{ id: string; paid_paise: string }>(`select id, paid_paise from invoices where status = 'paid' order by invoice_number`);
-  const row = unique ? r.rows.find((x) => !used.has(x.id)) : r.rows[r.rows.length - 1];
+  const rows = await queryRows<{ id: string; paid_paise: string }>(db, sql`select id, paid_paise from invoices where status = 'paid' order by invoice_number`);
+  const row = unique ? rows.find((x) => !used.has(x.id)) : rows[rows.length - 1];
   if (!row) throw new Error('no unused paid invoice in seed');
   if (unique) used.add(row.id);
   return { id: row.id, paid: Number(row.paid_paise) };
@@ -36,33 +38,40 @@ async function approved(key: string, amount = 100) {
   expect(await resolveApproval(db, { ...admin, approvalId: id, decision: 'approve' })).toMatchObject({ kind: 'resolved', status: 'approved' });
   return id;
 }
-const row = async (id: string) => (await db.query<Record<string, unknown>>('select * from approvals where id = $1', [id])).rows[0];
-async function sqlState(q: string, p: unknown[]): Promise<{ code?: string; message: string }> {
+const row = async (id: string) => (await queryRows<Record<string, unknown>>(db, sql`select * from approvals where id = ${id}`))[0];
+// drizzle wraps driver errors; the Postgres SQLSTATE and message live on the cause.
+async function sqlState(q: SQL): Promise<{ code?: string; message: string }> {
   try {
-    await db.query(q, p);
+    await queryRows(db, q);
   } catch (e) {
-    return e as { code?: string; message: string };
+    const err = e as { cause?: { code?: string; message: string }; code?: string; message: string };
+    return err.cause ?? err;
   }
-  throw new Error(`expected "${q}" to be refused`);
+  throw new Error('expected the statement to be refused');
 }
 
 beforeAll(async () => {
   ctx = await freshDb();
   await seed(ctx.db);
-  db = approvalsDb(ctx.client, ctx.url);
+  if (ctx.url) {
+    db = await connectAsApp(ctx.url);
+  } else {
+    await ctx.client.query('set role meridian_app');
+    db = ctx.db as unknown as AppDb;
+  }
 });
-afterAll(async () => { await db.close(); await ctx.client.close(); });
+afterAll(async () => { await closeAppDb(db); await ctx.client.close(); });
 
 describe('meridian_app UPDATE on approvals is column-level', () => {
   it('runs as meridian_app with no table-wide UPDATE, and UPDATE on exactly the written columns', async () => {
-    const r = await db.query<{ u: string; table_update: boolean }>(
-      `select current_user as u, has_table_privilege('meridian_app', 'approvals', 'UPDATE') as table_update`);
-    expect(r.rows[0]).toEqual({ u: 'meridian_app', table_update: false });
-    const cols = await db.query<{ column_name: string; can_update: boolean }>(
-      `select column_name, has_column_privilege('meridian_app', 'approvals', column_name, 'UPDATE') as can_update
+    const r = await queryRows<{ u: string; table_update: boolean }>(db,
+      sql`select current_user as u, has_table_privilege('meridian_app', 'approvals', 'UPDATE') as table_update`);
+    expect(r[0]).toEqual({ u: 'meridian_app', table_update: false });
+    const cols = await queryRows<{ column_name: string; can_update: boolean }>(db,
+      sql`select column_name, has_column_privilege('meridian_app', 'approvals', column_name, 'UPDATE') as can_update
          from information_schema.columns where table_schema = 'public' and table_name = 'approvals' order by column_name`);
-    expect(cols.rows.length).toBeGreaterThan(WRITABLE.length);
-    expect(cols.rows.filter((c) => c.can_update).map((c) => c.column_name)).toEqual(WRITABLE);
+    expect(cols.length).toBeGreaterThan(WRITABLE.length);
+    expect(cols.filter((c) => c.can_update).map((c) => c.column_name)).toEqual(WRITABLE);
   });
 
   // Same-value updates pass the trigger (IS DISTINCT FROM is false), so a refusal here is the grant alone.
@@ -72,7 +81,7 @@ describe('meridian_app UPDATE on approvals is column-level', () => {
       const before = await row(id);
       for (const st of ['pending', 'approved']) {
         if (st === 'approved') await resolveApproval(db, { ...admin, approvalId: id, decision: 'approve' });
-        const err = await sqlState(`update approvals set ${col} = ${col} where id = $1`, [id]);
+        const err = await sqlState(sql`update approvals set ${sql.identifier(col)} = ${sql.identifier(col)} where id = ${id}`);
         expect(err.code).toBe('42501');
         expect(err.message).toMatch(/permission denied for table approvals/);
       }
@@ -89,7 +98,7 @@ describe('meridian_app UPDATE on approvals is column-level', () => {
       ['tool', 'add_customer_note'],
     ];
     for (const [col, v] of cases) {
-      const err = await sqlState(`update approvals set ${col} = $2 where id = $1`, [id, v]);
+      const err = await sqlState(sql`update approvals set ${sql.identifier(col)} = ${v} where id = ${id}`);
       expect(err.code, col).toBe('42501');
     }
     const after = await row(id);
