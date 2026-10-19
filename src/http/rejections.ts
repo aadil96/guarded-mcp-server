@@ -76,10 +76,15 @@ export class RejectionAuditor {
       return false;
     }
     const startedAt = performance.now();
-    await inAppTx(this.db, (tx) => writeAudit(tx, {
-      actor: r.caller?.actor ?? 'anonymous', role: r.caller?.role ?? 'invalid', tool: 'http', outcome: 'denied', startedAt,
-      correlationId: randomUUID(), errorCode: r.errorCode, args: { ip: r.ip, status: r.status, method: r.method },
-    }));
+    try {
+      await inAppTx(this.db, (tx) => writeAudit(tx, {
+        actor: r.caller?.actor ?? 'anonymous', role: r.caller?.role ?? 'invalid', tool: 'http', outcome: 'denied', startedAt,
+        correlationId: randomUUID(), errorCode: r.errorCode, args: { ip: r.ip, status: r.status, method: r.method },
+      }));
+    } catch (e) {
+      this.countDropped(r.ip, 1);
+      throw e;
+    }
     return true;
   }
 

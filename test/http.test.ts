@@ -248,6 +248,25 @@ describe('HTTP transport: rejection limiter memory', () => {
     expect(await lastAudit()).toMatchObject({ error_code: 'rejections_dropped', arguments: { total: 3, byIp: { '10.0.0.1': 2, '10.0.0.2': 1 } } });
     await auditor.close();
   });
+
+  it('counts a refusal whose own audit row fails to write, so the next flush reports it', async () => {
+    let down = true;
+    const flaky = new Proxy(db, {
+      get(t, p) {
+        if (p === 'transaction' && down) return async () => { throw new Error('db down'); };
+        const v = Reflect.get(t, p);
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    const auditor = new RejectionAuditor(flaky, { burst: 5, refillPerSecond: 0, maxTrackedIps: 10 }, () => 0);
+    const hit = (ip: string) => auditor.record({ ip, status: 401, errorCode: 'invalid_token', method: 'POST' });
+    await expect(hit('10.0.0.4')).rejects.toThrow('db down');
+    await expect(hit('10.0.0.4')).rejects.toThrow('db down');
+    down = false;
+    expect(await auditor.flush()).toBe(2);
+    expect(await lastAudit()).toMatchObject({ error_code: 'rejections_dropped', arguments: { total: 2, byIp: { '10.0.0.4': 2 } } });
+    await auditor.close();
+  });
 });
 
 describe('HTTP transport: no token material anywhere', () => {
