@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type Db, executeApproval, requestWrite, resolveApproval } from '../../src/approvals/index.js';
+import { createApprovals, type Db, executeApproval, loadApprovalsConfig, requestWrite, resolveApproval } from '../../src/approvals/index.js';
 import { seed, seedId } from '../../src/db/seed.js';
 import { approvalsDb } from '../approvals-db.js';
 import { freshDb } from '../helpers.js';
@@ -129,12 +129,40 @@ describe('T3 resolver binding', () => {
     expect(await resolveApproval(db, { actor: 'op-2', role: 'operator', approvalId: r.approvalId, decision: 'approve' })).toEqual({ kind: 'denied', reason: 'admin_required' });
     expect((await lastAudit()).outcome).toBe('denied');
   });
-  it('requester cannot self-approve unless singleOperator', async () => {
+  it('self-approval is denied by default (config off)', async () => {
     const me = { actor: 'solo', role: 'admin' as const };
     const r = await requestWrite(db, { ...me, tool: 'issue_refund', args: refundArgs(seedId('invoice:9'), 100), idempotencyKey: 't3-self' });
     if (r.kind !== 'pending') throw new Error('expected pending');
     expect(await resolveApproval(db, { ...me, approvalId: r.approvalId, decision: 'approve' })).toEqual({ kind: 'denied', reason: 'self_approval_forbidden' });
-    expect(await resolveApproval(db, { ...me, approvalId: r.approvalId, decision: 'approve', singleOperator: true })).toMatchObject({ kind: 'resolved', status: 'approved' });
+    const off = createApprovals(loadApprovalsConfig({ NODE_ENV: 'development' }));
+    expect(await off.resolveApproval(db, { ...me, approvalId: r.approvalId, decision: 'approve' })).toEqual({ kind: 'denied', reason: 'self_approval_forbidden' });
+    expect((await lastAudit())).toMatchObject({ outcome: 'denied', error_code: 'self_approval_forbidden' });
+  });
+  it('a request carrying singleOperator is rejected as invalid_args (audited) and cannot self-approve', async () => {
+    const me = { actor: 'solo-smuggle', role: 'admin' as const };
+    const r = await requestWrite(db, { ...me, tool: 'issue_refund', args: refundArgs(seedId('invoice:9'), 101), idempotencyKey: 't3-smuggle' });
+    if (r.kind !== 'pending') throw new Error('expected pending');
+    const auditBefore = await n('audit_events');
+    const smuggled = { ...me, approvalId: r.approvalId, decision: 'approve', singleOperator: true } as unknown as Parameters<typeof resolveApproval>[1];
+    expect(await resolveApproval(db, smuggled)).toEqual({ kind: 'invalid_args' });
+    expect(await n('audit_events')).toBe(auditBefore + 1);
+    expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'invalid_args' });
+    const st = await ctx.client.query<{ status: string }>('select status from approvals where id = $1', [r.approvalId]);
+    expect(st.rows[0].status).toBe('pending');
+  });
+  it('self-approval is allowed only when server config enables single-operator mode', async () => {
+    const me = { actor: 'solo-dev', role: 'admin' as const };
+    const r = await requestWrite(db, { ...me, tool: 'issue_refund', args: refundArgs(seedId('invoice:9'), 102), idempotencyKey: 't3-solo-on' });
+    if (r.kind !== 'pending') throw new Error('expected pending');
+    const on = createApprovals(loadApprovalsConfig({ APPROVALS_SINGLE_OPERATOR: 'true', NODE_ENV: 'development' }));
+    expect(on.config.singleOperator).toBe(true);
+    expect(await on.resolveApproval(db, { ...me, approvalId: r.approvalId, decision: 'approve' })).toMatchObject({ kind: 'resolved', status: 'approved' });
+  });
+  it('startup refuses APPROVALS_SINGLE_OPERATOR=true in production', () => {
+    expect(() => loadApprovalsConfig({ APPROVALS_SINGLE_OPERATOR: 'true', NODE_ENV: 'production' })).toThrow(/not allowed when NODE_ENV=production/);
+    expect(() => loadApprovalsConfig({ APPROVALS_SINGLE_OPERATOR: 'yes' })).toThrow();
+    expect(loadApprovalsConfig({ NODE_ENV: 'production' })).toEqual({ singleOperator: false });
+    expect(loadApprovalsConfig({})).toEqual({ singleOperator: false });
   });
   it('knowing the approval id alone is not enough', async () => {
     const inv = await invoice();

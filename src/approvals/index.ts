@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import type { z } from 'zod';
+import { z } from 'zod';
 import { argsHash } from '../db/args-hash.js';
+import { type ApprovalsConfig, defaultApprovalsConfig } from './config.js';
 import { writeAudit } from './audit.js';
 import { issueRefund } from './refund.js';
 import type {
@@ -8,6 +9,7 @@ import type {
 } from './types.js';
 
 export * from './types.js';
+export { type ApprovalsConfig, defaultApprovalsConfig, loadApprovalsConfig } from './config.js';
 export { formatInr } from './refund.js';
 
 export const defaultHandlers: HandlerMap = { issue_refund: issueRefund };
@@ -87,15 +89,26 @@ export async function requestWrite(
   return classify(await find() as Approval);
 }
 
-export async function resolveApproval(
-  db: Db,
-  input: Caller & { approvalId: string; decision: 'approve' | 'deny'; singleOperator?: boolean },
-): Promise<ResolveResult> {
+/** Strict: unknown keys (e.g. a smuggled singleOperator) are invalid_args, not ignored. */
+const resolveInputSchema = z.strictObject({
+  actor: z.string().min(1),
+  role: z.enum(['reader', 'operator', 'admin']),
+  correlationId: z.string().optional(),
+  approvalId: z.string().refine(isUuid),
+  decision: z.enum(['approve', 'deny']),
+});
+export type ResolveInput = Caller & { approvalId: string; decision: 'approve' | 'deny' };
+
+/** Default export path: self-approval forbidden. Servers bind their startup config with createApprovals. */
+export function resolveApproval(db: Db, input: ResolveInput): Promise<ResolveResult> {
+  return resolveApprovalWith(defaultApprovalsConfig, db, input);
+}
+
+async function resolveApprovalWith(config: ApprovalsConfig, db: Db, input: ResolveInput): Promise<ResolveResult> {
   const startedAt = performance.now();
   const correlationId = input.correlationId ?? randomUUID();
   const base = { actor: input.actor, role: input.role, tool: 'resolve_approval', args: { approvalId: input.approvalId, decision: input.decision }, approvalId: null as string | null, startedAt, correlationId };
-  const decision: unknown = input.decision;
-  if (!isUuid(input.approvalId) || (decision !== 'approve' && decision !== 'deny')) {
+  if (!resolveInputSchema.safeParse(input).success) {
     await writeAudit(db, { ...base, outcome: 'error', errorCode: 'invalid_args' });
     return { kind: 'invalid_args' };
   }
@@ -107,7 +120,7 @@ export async function resolveApproval(
   base.approvalId = row.id;
   let reason: string | null = null;
   if (input.role !== 'admin') reason = 'admin_required';
-  else if (row.requested_by === input.actor && !input.singleOperator) reason = 'self_approval_forbidden';
+  else if (row.requested_by === input.actor && !config.singleOperator) reason = 'self_approval_forbidden';
   if (reason) {
     await writeAudit(db, { ...base, outcome: 'denied', errorCode: reason });
     return { kind: 'denied', reason };
@@ -182,5 +195,16 @@ export async function executeApproval(
     return outcome.ok
       ? finish({ kind: 'executed', approvalId, result }, claimed.rows[0])
       : finish({ kind: 'failed', approvalId, error: outcome.error }, claimed.rows[0]);
+  });
+}
+
+/** Bind approvals to server config read once at startup (see loadApprovalsConfig). */
+export function createApprovals(config: ApprovalsConfig = defaultApprovalsConfig) {
+  const cfg = Object.freeze({ ...config });
+  return Object.freeze({
+    config: cfg,
+    requestWrite,
+    executeApproval,
+    resolveApproval: (db: Db, input: ResolveInput) => resolveApprovalWith(cfg, db, input),
   });
 }
