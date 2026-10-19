@@ -1,12 +1,13 @@
 import type { AppQueryable, AppTx } from '../db/types.js';
 import type { z } from 'zod';
+import type { ApprovalId } from '../domain/brands.js';
 
 export type WriteTool = 'issue_refund' | 'update_order_status' | 'create_credit_note' | 'add_customer_note';
 export type { AuditOutcome, AuditRole, Role } from '../audit/log.js';
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'executed' | 'failed';
 
 export type Approval = {
-  id: string;
+  id: ApprovalId;
   tool: WriteTool;
   idempotency_key: string;
   args_hash: string;
@@ -19,23 +20,23 @@ export type Approval = {
 };
 
 export type RequestWriteResult =
-  | { kind: 'pending'; approvalId: string; summary: string; approval: Approval }
-  | { kind: 'duplicate'; approvalId: string; status: ApprovalStatus; result: unknown }
-  | { kind: 'conflict'; approvalId: string }
+  | { kind: 'pending'; approvalId: ApprovalId; summary: string; approval: Approval }
+  | { kind: 'duplicate'; approvalId: ApprovalId; status: ApprovalStatus; result: unknown }
+  | { kind: 'conflict'; approvalId: ApprovalId }
   | { kind: 'denied'; reason: string }
   | { kind: 'invalid_args'; issues: z.core.$ZodIssue[] };
 
 export type ResolveResult =
-  | { kind: 'resolved'; approvalId: string; status: 'approved' | 'denied' }
+  | { kind: 'resolved'; approvalId: ApprovalId; status: 'approved' | 'denied' }
   | { kind: 'denied'; reason: string }
   | { kind: 'not_found' }
   | { kind: 'invalid_state'; status: ApprovalStatus }
   | { kind: 'invalid_args' };
 
 export type ExecuteResult =
-  | { kind: 'executed'; approvalId: string; result: unknown }
-  | { kind: 'failed'; approvalId: string; error: string }
-  | { kind: 'duplicate'; approvalId: string; status: ApprovalStatus; result: unknown }
+  | { kind: 'executed'; approvalId: ApprovalId; result: unknown }
+  | { kind: 'failed'; approvalId: ApprovalId; error: string }
+  | { kind: 'duplicate'; approvalId: ApprovalId; status: ApprovalStatus; result: unknown }
   | { kind: 'not_approved'; status: ApprovalStatus }
   | { kind: 'denied'; reason: string }
   | { kind: 'not_found' }

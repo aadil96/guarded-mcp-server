@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { type SQL, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { argsHash } from '../db/args-hash.js';
 import { inAppTx, queryRows } from '../db/index.js';
@@ -11,6 +11,7 @@ import type {
 } from './types.js';
 import type { Caller } from '../audit/log.js';
 import type { AppDb, AppQueryable } from '../db/types.js';
+import { type ApprovalId, zApprovalId } from '../domain/brands.js';
 
 export * from './types.js';
 export { type ApprovalsConfig, defaultApprovalsConfig, loadApprovalsConfig } from './config.js';
@@ -51,8 +52,13 @@ const callerIssue = { code: 'custom', path: ['caller'], message: 'invalid caller
 const lookupHandler = (handlers: HandlerMap, tool: unknown) =>
   typeof tool === 'string' && Object.hasOwn(handlers, tool) ? handlers[tool as WriteTool] : undefined;
 
-const getApproval = async (db: AppQueryable, id: string) =>
-  (await queryRows<Approval>(db, sql`select * from approvals where id = ${id}`))[0];
+/** The DB row boundary for approvals: every row read goes through here, so its id is branded by zApprovalId. */
+async function approvalRows(db: AppQueryable, q: SQL): Promise<Approval[]> {
+  return (await queryRows<Omit<Approval, 'id'> & { id: string }>(db, q)).map((r) => ({ ...r, id: zApprovalId.parse(r.id) }));
+}
+
+const getApproval = async (db: AppQueryable, id: ApprovalId) =>
+  (await approvalRows(db, sql`select * from approvals where id = ${id}`))[0];
 
 export async function requestWrite(
   db: AppDb,
@@ -110,7 +116,7 @@ export async function requestWrite(
     return { kind: 'duplicate', approvalId: row.id, status: row.status, result: row.result };
   };
 
-  const find = async () => (await queryRows<Approval>(db,
+  const find = async () => (await approvalRows(db,
     sql`select * from approvals where tool = ${input.tool} and idempotency_key = ${input.idempotencyKey}`))[0];
 
   const existing = await find();
@@ -119,7 +125,7 @@ export async function requestWrite(
   const summary = await handler.summarize(db, args);
   // Insert and its audit row commit together; an audit failure rolls the approval back.
   const created = await inAppTx(db, async (tx) => {
-    const [row] = await queryRows<Approval>(tx, sql`
+    const [row] = await approvalRows(tx, sql`
       insert into approvals (id, tool, idempotency_key, args_hash, arguments, summary, requested_by)
       values (${randomUUID()}, ${input.tool}, ${input.idempotencyKey}, ${hash}, ${JSON.stringify(args)}::jsonb, ${summary}, ${caller.actor})
       on conflict (tool, idempotency_key) do nothing returning *`);
@@ -139,7 +145,7 @@ const resolveInputSchema = z.strictObject({
   approvalId: z.string().refine(isUuid),
   decision: z.enum(['approve', 'deny']),
 });
-export type ResolveInput = Caller & { approvalId: string; decision: 'approve' | 'deny' };
+export type ResolveInput = Caller & { approvalId: ApprovalId; decision: 'approve' | 'deny' };
 
 /** Default export path: self-approval forbidden. Servers bind their startup config with createApprovals. */
 export function resolveApproval(db: AppDb, input: ResolveInput): Promise<ResolveResult> {
@@ -171,7 +177,7 @@ async function resolveApprovalWith(config: ApprovalsConfig, db: AppDb, input: Re
   const status = input.decision === 'approve' ? 'approved' : 'denied';
   // Status change and its audit row commit in one transaction.
   return inAppTx(db, async (tx): Promise<ResolveResult> => {
-    const [updated] = await queryRows<Approval>(tx, sql`
+    const [updated] = await approvalRows(tx, sql`
       update approvals set status = ${status}, resolved_by = ${caller.actor}, resolved_at = now()
       where id = ${row.id} and status = 'pending' returning *`);
     if (!updated) {
@@ -186,7 +192,7 @@ async function resolveApprovalWith(config: ApprovalsConfig, db: AppDb, input: Re
 
 export async function executeApproval(
   db: AppDb,
-  approvalId: string,
+  approvalId: ApprovalId,
   rawCaller: Caller,
   handlers: HandlerMap = defaultHandlers,
 ): Promise<ExecuteResult> {
@@ -217,7 +223,7 @@ export async function executeApproval(
       return r;
     };
     // Row lock serializes concurrent executors; the loser sees a non-approved status afterwards.
-    const [locked] = await queryRows<Approval>(tx,
+    const [locked] = await approvalRows(tx,
       sql`select * from approvals where id = ${approvalId} and status = 'approved' for update`);
     if (!locked) {
       const cur = await getApproval(tx, approvalId);
@@ -241,7 +247,7 @@ export async function executeApproval(
     // status claim and its audit row always commit instead of rolling back and leaving it 'approved'.
     const error = outcome.ok ? '' : jsonbSafeString(typeof outcome.error === 'string' ? outcome.error : String(outcome.error)).slice(0, 200);
     const result = outcome.ok ? jsonSafe(outcome.result) : { error };
-    const [claimed] = await queryRows<Approval>(tx, sql`
+    const [claimed] = await approvalRows(tx, sql`
       update approvals set status = ${outcome.ok ? 'executed' : 'failed'}, result = ${toJsonb(result)}::jsonb, executed_at = now()
       where id = ${approvalId} and status = 'approved' returning *`);
     if (!claimed) throw new Error('approval claim lost despite row lock');

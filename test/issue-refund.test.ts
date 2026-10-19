@@ -6,6 +6,7 @@ import type { AppDb } from '../src/db/types.js';
 import { serverTools } from '../src/server.js';
 import { approvalHandlers } from '../src/tools/framework.js';
 import { freshDb, mcpClient } from './helpers.js';
+import { zApprovalId } from '../src/domain/brands.js';
 
 // issue_refund as the shipped server registers it: default tool list, MCP client/server pair, app role.
 let ctx: Awaited<ReturnType<typeof freshDb>>;
@@ -59,14 +60,14 @@ describe('issue_refund over MCP', () => {
   it('pending: approvalId and summary, one pending_approval audit row, no money moves', async () => {
     const r = await cli.call('issue_refund', args(1500, 'r-pending'));
     expect(r.isError).toBe(false);
-    expect(r.data).toEqual({ status: 'pending_approval', approvalId: expect.any(String), summary: `Refund ₹15.00 on ${invoiceNumber}` });
+    expect(r.data).toEqual({ status: 'pending_approval', approvalId: expect.any(String), summary: expect.stringMatching(new RegExp(`^Refund ₹15\\.00 on ${invoiceNumber}; ₹[\\d,]+\\.\\d{2} refundable when requested$`)) });
     expect(await auditCount()).toBe(before + 1);
     expect(await lastAudit()).toMatchObject({
       tool: 'issue_refund', outcome: 'pending_approval', error_code: null, approval_id: r.data.approvalId,
       idempotency_key: 'r-pending', actor: 'op-refund', role: 'operator',
     });
     expect(await one('select status, summary from approvals where id = $1', [r.data.approvalId]))
-      .toEqual({ status: 'pending', summary: `Refund ₹15.00 on ${invoiceNumber}` });
+      .toEqual({ status: 'pending', summary: r.data.summary });
     expect(await moneyState()).toEqual(money);
   });
 
@@ -120,7 +121,7 @@ describe('issue_refund over MCP', () => {
 
   it('nothing executes until approve + execute; then the same call is a duplicate with the result', async () => {
     const { data } = await cli.call('issue_refund', args(2500, 'r-exec'));
-    const id = data.approvalId as string;
+    const id = zApprovalId.parse(data.approvalId);
     expect(await moneyState()).toEqual(money);
     expect((await resolveApproval(db, { ...admin, approvalId: id, decision: 'approve' })).kind).toBe('resolved');
     expect(await moneyState()).toEqual(money);
