@@ -39,6 +39,10 @@ function checkCaller(input: unknown): CallerCheck {
 }
 const callerIssue = { code: 'custom', path: ['caller'], message: 'invalid caller metadata (actor, role or correlationId)' } as z.core.$ZodIssue;
 
+/** Own-property lookup only: names like 'toString' or '__proto__' must not resolve to Object.prototype members. */
+const lookupHandler = (handlers: HandlerMap, tool: unknown) =>
+  typeof tool === 'string' && Object.hasOwn(handlers, tool) ? handlers[tool as WriteTool] : undefined;
+
 const getApproval = async (sql: Sql, id: string) =>
   (await sql.query<Approval>('select * from approvals where id = $1', [id])).rows[0];
 
@@ -57,7 +61,7 @@ export async function requestWrite(
     await db.transaction((tx) => writeAudit(tx, { ...base, outcome: 'error', errorCode: 'invalid_args' }));
     return { kind: 'invalid_args', issues: [callerIssue] };
   }
-  const handler = handlers[input.tool];
+  const handler = lookupHandler(handlers, input.tool);
   if (caller.role === 'reader' || !handler) {
     const reason = !handler ? 'tool_not_supported' : 'role_not_permitted';
     await writeAudit(db, { ...base, outcome: 'denied', errorCode: reason });
@@ -212,7 +216,7 @@ export async function executeApproval(
       if (cur.status === 'executed' || cur.status === 'failed') return finish({ kind: 'duplicate', approvalId, status: cur.status, result: cur.result }, cur);
       return finish({ kind: 'not_approved', status: cur.status }, cur);
     }
-    const handler = handlers[locked.tool];
+    const handler = lookupHandler(handlers, locked.tool);
     await tx.query('savepoint exec_tool');
     let outcome: Awaited<ReturnType<NonNullable<typeof handler>['execute']>>;
     try {

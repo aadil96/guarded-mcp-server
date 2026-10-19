@@ -407,4 +407,14 @@ describe('runtime input hardening (Codex re-review)', () => {
       expect(st.rows[0].status).toBe('pending');
     });
   }
+
+  for (const tool of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+    it(`inherited name ${tool} as tool is an audited tool_not_supported denial`, async () => {
+      const auditBefore = await n('audit_events');
+      const r = await requestWrite(db, { ...op, tool: tool as never, args: {}, idempotencyKey: `proto-${tool}` });
+      expect(r).toEqual({ kind: 'denied', reason: 'tool_not_supported' });
+      expect(await n('audit_events')).toBe(auditBefore + 1);
+      expect(await lastAudit()).toMatchObject({ outcome: 'denied', error_code: 'tool_not_supported' });
+    });
+  }
 });
