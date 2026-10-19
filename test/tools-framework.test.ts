@@ -46,6 +46,12 @@ describe('strictness reaches every container', () => {
       expect(() => assertStrict(z.strictObject({ x: inner as z.ZodType }))).toThrow(/must be a strict object/);
     }
     expect(() => assertStrict(z.strictObject({ x: z.lazy(() => strict) }))).toThrow(/lazy schema/);
+    // Codecs decode during parsing; the SDK's decoded output would fail the framework's second parse.
+    expect(() => assertStrict(z.strictObject({ n: z.codec(z.string(), z.number(), { decode: Number, encode: String }) }))).toThrow(/codec/);
+    // Types JSON Schema can't express would make tools/list throw for every tool, so they fail at definition.
+    for (const unrepresentable of [z.date(), z.bigint(), z.symbol(), z.undefined(), z.void(), z.nan()]) {
+      expect(() => defineReadTool({ name: 'u', description: 'u', input: z.strictObject({ v: unrepresentable }), run: async () => null })).toThrow(/JSON Schema/);
+    }
     for (const permissive of [z.any(), z.unknown(), z.custom<object>(() => true)]) {
       expect(() => assertStrict(z.strictObject({ payload: permissive }))).toThrow(/schema, which strictness can't be checked/);
     }

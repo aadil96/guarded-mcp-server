@@ -63,6 +63,8 @@ export function assertStrict(schema: z.ZodType, path = 'input'): void {
       for (const [i, o] of (def.options as z.ZodType[]).entries()) assertStrict(o, `${path}|${i}`);
       return;
     case 'pipe':
+      // A codec decodes while parsing: the SDK passes the decoded value on and the framework's second parse rejects it.
+      if (def.transform) throw new Error(`${path} uses a codec; tool inputs must parse to the same shape they accept`);
       assertStrict(def.in as z.ZodType, path);
       assertStrict(def.out as z.ZodType, path);
       return;
@@ -92,6 +94,15 @@ export function assertStrict(schema: z.ZodType, path = 'input'): void {
   }
 }
 
+/** tools/list converts every input schema to JSON Schema; one that can't convert would break listing for every tool. */
+function assertWireSchema(schema: z.ZodType, name: string): void {
+  try {
+    z.toJSONSchema(schema, { io: 'input' });
+  } catch (e) {
+    throw new Error(`${name}.input can't be expressed as JSON Schema for tools/list: ${(e as Error).message}`);
+  }
+}
+
 const LEAF_TYPES = new Set([
   // Not any, unknown or custom: they accept arbitrary objects, so unknown keys would pass through unchecked.
   'string', 'number', 'int', 'bigint', 'boolean', 'date', 'symbol', 'null', 'undefined', 'void', 'never',
@@ -110,6 +121,7 @@ export type ReadToolSpec<S extends ToolInput> = {
 
 export function defineReadTool<S extends ToolInput>(spec: ReadToolSpec<S>): DefinedTool {
   assertStrict(spec.input, `${spec.name}.input`);
+  assertWireSchema(spec.input, spec.name);
   return Object.freeze({
     [toolBrand]: true as const,
     name: spec.name,
@@ -201,6 +213,7 @@ export function mapRequestWriteResult(r: RequestWriteResult): CallToolResult {
 
 export function defineWriteTool<S extends ToolInput>(spec: WriteToolSpec<S>): DefinedTool {
   assertStrict(spec.input, `${spec.name}.input`);
+  assertWireSchema(spec.input, spec.name);
   if (IDEMPOTENCY_KEY in spec.input.shape) throw new Error(`${spec.name}.input must not declare ${IDEMPOTENCY_KEY}; the framework adds it`);
   // max(200) counts characters, so it only advertises a bound in tools/list. The real limit is 200 UTF-8 bytes,
   // enforced (and audited) by requestWrite; a non-ASCII key can pass this schema and still be rejected there.
