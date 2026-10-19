@@ -30,6 +30,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+      - name: Enforce MCP registration via framework
+        run: pnpm check:tool-register
       - name: Enforce restricted DB access (no direct pools/drizzle outside db module)
         run: pnpm check:db-access
       - name: Migrate on real Postgres 16

@@ -84,7 +84,8 @@ export async function requestWrite(
     await inAppTx(db, (tx) => writeAudit(tx, { ...base, idempotencyKey: null, outcome: 'error', errorCode: 'invalid_args' }));
     return { kind: 'invalid_args', issues: [{ code: 'custom', path: ['idempotencyKey'], message: `idempotency key must be a non-empty string of at most ${MAX_IDEMPOTENCY_KEY_BYTES} UTF-8 bytes` } as z.core.$ZodIssue] };
   }
-  const parsed = handler.schema.safeParse(input.args);
+  // Async, so schemas with async refinements or transforms parse instead of throwing.
+  const parsed = await handler.schema.safeParseAsync(input.args);
   if (!parsed.success) {
     await inAppTx(db, (tx) => writeAudit(tx, { ...base, outcome: 'error', errorCode: 'invalid_args' }));
     return { kind: 'invalid_args', issues: parsed.error.issues };
