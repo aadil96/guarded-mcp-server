@@ -5,32 +5,43 @@ const SENSITIVE = /(email|phone|gstin|token|secret|password|api[_-]?key)/i;
 
 const MAX_DEPTH = 8;
 const MAX_KEYS = 100;
+const MAX_NODES = 2000;
+
+type Walk = { path: WeakSet<object>; budget: number };
 
 /**
  * Redact and make JSON-safe in one bounded pass: runtime-rejected input may hold bigints,
  * functions, symbols or cycles, and none of those may stop the audit row from being written.
+ * A global node budget bounds total work even for shared-reference graphs.
  */
-export function redact(value: unknown, depth = 0, seen: WeakSet<object> = new WeakSet()): unknown {
+export function redact(value: unknown): unknown {
+  return walk(value, 0, { path: new WeakSet(), budget: MAX_NODES });
+}
+
+function walk(value: unknown, depth: number, w: Walk): unknown {
+  if (w.budget <= 0) return '[truncated]';
+  w.budget -= 1;
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
   if (typeof value === 'bigint') return `${value.toString()}n`;
   if (typeof value === 'string') return value.length > 200 ? `${value.slice(0, 200)}…` : value;
   if (typeof value === 'undefined') return null;
   if (typeof value !== 'object') return `[${typeof value}]`;
-  if (seen.has(value)) return '[circular]';
+  if (w.path.has(value)) return '[circular]';
   if (depth >= MAX_DEPTH) return '[truncated]';
-  seen.add(value);
+  w.path.add(value);
   try {
-    if (Array.isArray(value)) return value.slice(0, MAX_KEYS).map((v) => redact(v, depth + 1, seen));
+    if (Array.isArray(value)) return value.slice(0, MAX_KEYS).map((v) => walk(v, depth + 1, w));
     const out: Record<string, unknown> = {};
     for (const k of Object.keys(value).slice(0, MAX_KEYS)) {
+      if (w.budget <= 0) { out['…'] = '[truncated]'; break; }
       let v: unknown;
       try { v = (value as Record<string, unknown>)[k]; } catch { v = '[unreadable]'; }
-      out[k] = SENSITIVE.test(k) ? '[redacted]' : redact(v, depth + 1, seen);
+      out[k] = SENSITIVE.test(k) ? '[redacted]' : walk(v, depth + 1, w);
     }
     return out;
   } finally {
-    seen.delete(value);
+    w.path.delete(value);
   }
 }
 

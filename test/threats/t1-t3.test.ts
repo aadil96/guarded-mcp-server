@@ -445,4 +445,22 @@ describe('runtime input hardening (Codex re-review)', () => {
     expect(a.rows[1].arguments.self).toBe('[circular]');
     expect(a.rows[2].arguments.fn).toBe('[function]');
   });
+
+  it('shared-reference argument graphs are audited within a global traversal budget', async () => {
+    const inv = await sharedInv();
+    // 8 levels x 100 keys all pointing at the next level: ~100^8 paths without a global budget.
+    let next: Record<string, unknown> = { leaf: true };
+    for (let lvl = 0; lvl < 8; lvl++) {
+      const o: Record<string, unknown> = {};
+      for (let k = 0; k < 100; k++) o[`k${k}`] = next;
+      next = o;
+    }
+    const auditBefore = await n('audit_events');
+    const t0 = performance.now();
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: { invoice_id: inv.id, amount_paise: 100, reason: 'x', graph: next } as never, idempotencyKey: 'shared-graph' });
+    expect(performance.now() - t0).toBeLessThan(2000);
+    expect(r.kind).toBe('invalid_args');
+    expect(await n('audit_events')).toBe(auditBefore + 1);
+    expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'invalid_args' });
+  });
 });
