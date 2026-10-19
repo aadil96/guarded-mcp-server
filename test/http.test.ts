@@ -6,6 +6,7 @@ import { mintToken, parseTokenConfig, type TokenEntry } from '../src/auth/tokens
 import { closeAppDb, connectAsApp } from '../src/db/index.js';
 import { seed } from '../src/db/seed.js';
 import type { AppDb } from '../src/db/types.js';
+import { RejectionAuditor } from '../src/http/rejections.js';
 import { startHttpServer } from '../src/http/server.js';
 import { serverTools } from '../src/server.js';
 import { approvalHandlers } from '../src/tools/framework.js';
@@ -207,6 +208,21 @@ describe('HTTP transport: bounded rejection audit', () => {
       expect(await lastAudit()).toMatchObject({ error_code: 'invalid_token' });
       expect(await flood.rejections.flush()).toBe(0);
     } finally { await flood.close(); }
+  });
+});
+
+describe('HTTP transport: rejection limiter memory', () => {
+  it('tracks at most maxTrackedIps buckets, forgetting the least recently seen IP first', async () => {
+    const auditor = new RejectionAuditor(db, { burst: 1, refillPerSecond: 0, maxTrackedIps: 2 }, () => 0);
+    const hit = (ip: string) => auditor.record({ ip, status: 401, errorCode: 'invalid_token', method: 'POST' });
+    expect(await hit('10.0.0.1')).toBe(true);
+    expect(await hit('10.0.0.1')).toBe(false);
+    expect(await hit('10.0.0.2')).toBe(true);
+    expect(await hit('10.0.0.1')).toBe(false);
+    expect(await hit('10.0.0.3')).toBe(true);
+    expect(await hit('10.0.0.1')).toBe(false);
+    expect(await hit('10.0.0.2')).toBe(true);
+    await auditor.close();
   });
 });
 
