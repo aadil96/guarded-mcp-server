@@ -57,7 +57,7 @@ child.removeAllListeners('exit');
 child.kill('SIGTERM');
 const [code, signal] = await new Promise<[number | null, string | null]>((res) => child.once('exit', (c, s) => res([c, s])));
 clearTimeout(timer);
-check(code === 0 || signal === 'SIGTERM', `server should exit cleanly on SIGTERM (code ${code}, signal ${signal})`);
+check(code === 0 && signal === null, `server must handle SIGTERM and exit 0 on its own (code ${code}, signal ${signal})`);
 console.log(`server exited on SIGTERM (code ${code}, signal ${signal})`);
 console.log('http smoke OK');
 process.exit(0);
