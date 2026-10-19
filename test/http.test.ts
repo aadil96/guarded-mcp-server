@@ -328,6 +328,64 @@ describe('HTTP transport: rejection limiter memory', () => {
   });
 });
 
+describe('HTTP transport: shutdown', () => {
+  const slowDb = () => {
+    const ctl = { delayMs: 0, hang: false };
+    const proxy = new Proxy(db, {
+      get(t, p) {
+        const v = Reflect.get(t, p);
+        if (p === 'transaction') {
+          return async (...a: unknown[]) => {
+            if (ctl.hang) return new Promise(() => {});
+            await new Promise((r) => setTimeout(r, ctl.delayMs));
+            return (v as (...x: unknown[]) => unknown).apply(t, a);
+          };
+        }
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    return { ctl, db: proxy };
+  };
+  const connectTo = async (url: URL, token: string) => {
+    const client = new Client({ name: 'http-test', version: '0' });
+    await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    return client;
+  };
+
+  it('close lets an in-flight tool call finish and write its audit row before resolving', async () => {
+    const slow = slowDb();
+    const s2 = await startHttpServer({ db: slow.db, tokens });
+    const c = await connectTo(s2.url, reader.token);
+    const before = await auditCount();
+    slow.ctl.delayMs = 300;
+    const call = c.callTool({ name: 'get_invoice', arguments: { invoice_id: invoiceId } });
+    await new Promise((r) => setTimeout(r, 50));
+    let closed = false;
+    const closing = s2.close().then(() => { closed = true; });
+    const result = await call;
+    expect(result.isError).toBeFalsy();
+    await closing;
+    expect(closed).toBe(true);
+    expect(await auditCount()).toBe(before + 1);
+    expect(await lastAudit()).toMatchObject({ actor: 'reader-bot', tool: 'get_invoice', outcome: 'ok' });
+    await c.close().catch(() => {});
+  });
+
+  it('close force-closes a request still running after the grace period', async () => {
+    const slow = slowDb();
+    const s2 = await startHttpServer({ db: slow.db, tokens, shutdownGraceMs: 100 });
+    const c = await connectTo(s2.url, reader.token);
+    slow.ctl.hang = true;
+    const call = c.callTool({ name: 'get_invoice', arguments: { invoice_id: invoiceId } }).catch((e: Error) => e);
+    await new Promise((r) => setTimeout(r, 50));
+    const t0 = Date.now();
+    await s2.close();
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(await call).toBeInstanceOf(Error);
+    await c.close().catch(() => {});
+  });
+});
+
 describe('HTTP transport: no token material anywhere', () => {
   it('raw tokens and their hashes never appear in audit rows or logs', async () => {
     const dump = (await rows<{ t: string }>('select coalesce(string_agg(a::text, chr(10)), \'\') t from audit_events a'))[0].t;

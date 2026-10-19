@@ -11,6 +11,7 @@ import { type Rejection, RejectionAuditor, type RejectionLimits } from './reject
 
 export const MCP_PATH = '/mcp';
 export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
 
 export type HttpOptions = {
   db: AppDb;
@@ -23,6 +24,8 @@ export type HttpOptions = {
   allowedOrigins?: readonly string[];
   maxBodyBytes?: number;
   rejectionLimits?: RejectionLimits;
+  /** How long close() waits for in-flight requests before cutting their connections. */
+  shutdownGraceMs?: number;
   /** For tests: the clock the per-IP rejection limit uses. */
   now?: () => number;
 };
@@ -127,11 +130,13 @@ export function startHttpServer(opts: HttpOptions) {
     }
   }
 
+  const active = new Set<Promise<void>>();
   const http = createHttpServer((req, res) => {
-    handle(req, res).catch((e) => {
+    const done = handle(req, res).catch((e) => {
       console.error('http request failed:', e instanceof Error ? e.message : 'unknown error');
       sendJson(res, 500, { error: 'internal_error' });
-    });
+    }).finally(() => { active.delete(done); });
+    active.add(done);
   });
   http.requestTimeout = 30_000;
   http.headersTimeout = 10_000;
@@ -145,7 +150,16 @@ export function startHttpServer(opts: HttpOptions) {
         url: new URL(`http://${host}:${a.port}${MCP_PATH}`),
         rejections,
         close: async () => {
-          await new Promise<void>((r) => { http.close(() => r()); http.closeAllConnections(); });
+          const stopped = new Promise<void>((r) => { http.close(() => r()); });
+          http.closeIdleConnections();
+          let grace: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            Promise.allSettled([...active]),
+            new Promise<void>((r) => { grace = setTimeout(r, opts.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS); }),
+          ]);
+          clearTimeout(grace);
+          http.closeAllConnections();
+          await stopped;
           await rejections.close().catch((e) => { console.error('final rejection summary audit failed:', (e as Error).message); });
         },
       });
