@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApprovals, executeApproval, requestWrite, resolveApproval } from '../src/approvals/index.js';
-import { TRANSITIONS } from '../src/approvals/state.js';
+import { getApproval, TRANSITIONS } from '../src/approvals/state.js';
 import type { ApprovalStatus } from '../src/approvals/types.js';
 import { closeAppDb, connectAsApp, inAppTx } from '../src/db/index.js';
 import { seed } from '../src/db/seed.js';
@@ -60,7 +60,8 @@ describe('the transition table is the database trigger, exactly', () => {
         const accepted = await inAppTx(db, async (tx) => {
           await tx.execute(sql`savepoint probe`);
           try {
-            await tx.execute(sql`update approvals set status = ${to} where id = ${id}`);
+            // Set resolved_by alongside, as resolvePending does, so the probe isolates the trigger's verdict.
+            await tx.execute(sql`update approvals set status = ${to}, resolved_by = coalesce(resolved_by, 'probe') where id = ${id}`);
             return true;
           } catch {
             return false;
@@ -71,6 +72,54 @@ describe('the transition table is the database trigger, exactly', () => {
         expect(accepted, `${from} -> ${to}`).toBe((TRANSITIONS[from] as readonly string[]).includes(to));
       }
       expect((await row(id)).status).toBe(from);
+    }
+  });
+});
+
+/** SQLSTATE and constraint of an UPDATE run as meridian_app, rolled back either way. */
+async function refusal(id: ApprovalId, set: ReturnType<typeof sql>): Promise<{ code?: string; constraint?: string } | null> {
+  return inAppTx(db, async (tx) => {
+    await tx.execute(sql`savepoint inv`);
+    try {
+      await tx.execute(sql`update approvals set ${set} where id = ${id}`);
+      return null;
+    } catch (e) {
+      const err = (e as { cause?: { code?: string; constraint?: string } }).cause ?? (e as { code?: string; constraint?: string });
+      return { code: err.code, constraint: err.constraint };
+    } finally {
+      await tx.execute(sql`rollback to savepoint inv`);
+    }
+  });
+}
+
+describe('the database enforces the invariants the typed row parser relies on', () => {
+  const resolvedBy = { code: '23514', constraint: 'approvals_resolved_by_iff_resolved' };
+  const resultOnlyFinal = { code: '23514', constraint: 'approvals_result_only_when_final' };
+
+  it('a status-only resolve (no resolved_by) is refused, so no unparseable resolved row can exist', async () => {
+    const id = await inState('pending');
+    expect(await refusal(id, sql`status = 'approved'`)).toEqual(resolvedBy);
+    expect(await refusal(id, sql`status = 'denied'`)).toEqual(resolvedBy);
+  });
+
+  it('resolved_by cannot be set on a pending row, nor cleared on a resolved one', async () => {
+    expect(await refusal(await inState('pending'), sql`resolved_by = 'x'`)).toEqual(resolvedBy);
+    for (const s of ['approved', 'denied', 'executed', 'failed'] as const) {
+      expect(await refusal(await inState(s), sql`resolved_by = null`), s).toEqual(resolvedBy);
+    }
+  });
+
+  it('result can only be present on executed or failed rows', async () => {
+    for (const s of ['pending', 'approved', 'denied'] as const) {
+      expect(await refusal(await inState(s), sql`result = '{"x":1}'::jsonb`), s).toEqual(resultOnlyFinal);
+    }
+  });
+
+  it('every row the database accepts after each transition parses at the typed boundary', async () => {
+    for (const s of STATUSES) {
+      const id = await inState(s);
+      const parsed = await inAppTx(db, (tx) => getApproval(tx, id));
+      expect(parsed?.status, s).toBe(s);
     }
   });
 });

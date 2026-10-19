@@ -120,6 +120,10 @@ export const approvals = pgTable('approvals', {
 }, (t) => [
   uniqueIndex('approvals_tool_key_uq').on(t.tool, t.idempotencyKey),
   check('approvals_args_hash_fmt', sql`${t.argsHash} ~ '^[0-9a-f]{64}$'`),
+  // The typed row boundary (src/approvals/state.ts) relies on these: a resolved row always names who
+  // resolved it, a pending one never does, and only executed/failed rows carry a result.
+  check('approvals_resolved_by_iff_resolved', sql`(${t.status} = 'pending') = (${t.resolvedBy} is null)`),
+  check('approvals_result_only_when_final', sql`${t.result} is null or ${t.status} in ('executed', 'failed')`),
 ]);
 
 export const auditEvents = pgTable('audit_events', {
