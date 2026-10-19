@@ -25,6 +25,8 @@ const SERVER_CTOR = new RegExp([
   /\bimport\s+(?!type\b)(?:[\w$]+\s*,\s*)?\*\s*as\s+[\w$]+\s+from\s*['"`]@modelcontextprotocol\/(?:server|sdk)/.source,
   /\bimport\s+(?!type\b)[\w$]+\s+from\s*['"`]@modelcontextprotocol\/(?:server|sdk)/.source,
   /\b(?:import|require)\s*\(\s*['"`]@modelcontextprotocol\/(?:server|sdk)/.source,
+  // Re-exports hand the classes on under another name, so any value re-export from the SDK counts.
+  /\bexport\s+(?!type\b)(?:\*|\{[^}]*?(?<!\btype\s+)\b(?:Mcp)?Server\b[^}]*\})\s*(?:as\s+[\w$]+\s*)?from\s*['"`]@modelcontextprotocol\//.source,
 ].join('|'));
 
 const RULES = [

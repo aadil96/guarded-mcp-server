@@ -62,9 +62,12 @@ describe('check-mcp-register', () => {
       `import * as sdk from '@modelcontextprotocol/server';\nnew sdk.McpServer({ name: 'x', version: '0' });`,
       `const { McpServer: M } = await import('@modelcontextprotocol/server');`,
       `const sdk = require('@modelcontextprotocol/server');`,
+      `export { McpServer as RenamedServer } from '@modelcontextprotocol/server';`,
+      `export * from '@modelcontextprotocol/server';`,
+      `export * as sdk from '@modelcontextprotocol/server';`,
     ]) expect(check({ 'src/x.ts': src }).out, src).toContain('constructs an MCP server');
     // Type-only imports construct nothing.
-    expect(check({ 'src/x.ts': `import type { McpServer } from '@modelcontextprotocol/server';\nimport { type McpServer as T } from '@modelcontextprotocol/server';` }).code).toBe(0);
+    expect(check({ 'src/x.ts': `import type { McpServer } from '@modelcontextprotocol/server';\nimport { type McpServer as T } from '@modelcontextprotocol/server';\nexport type { McpServer } from '@modelcontextprotocol/server';` }).code).toBe(0);
     expect(check({ 'scripts/x.ts': `server.registerTool('x', {}, h);` }).code).toBe(1);
   });
 
