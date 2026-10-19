@@ -329,4 +329,11 @@ describe('runtime input hardening (Codex re-review)', () => {
     const st = await ctx.client.query<{ status: string }>('select status from invoices where id = $1', [inv.id]);
     expect(st.rows[0].status).not.toBe('refunded');
   });
+
+  it('approval summary shows the exact paise that execution will use', async () => {
+    const inv = await sharedInv();
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, Number.MAX_SAFE_INTEGER), idempotencyKey: `sum-max-${inv.id}` });
+    if (r.kind !== 'pending') throw new Error(r.kind);
+    expect(r.summary).toBe(`Refund ₹9,00,71,99,25,47,409.91 on ${inv.number}`);
+  });
 });

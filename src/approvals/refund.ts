@@ -1,8 +1,16 @@
 import { z } from 'zod';
 import type { Approval, Sql, ToolHandler } from './types.js';
 
-export function formatInr(paise: number): string {
-  return `₹${(paise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+/** Integer-only INR formatting (en-IN grouping); no float division, so every paise is exact. */
+export function formatInr(paise: number | bigint): string {
+  const v = BigInt(paise);
+  const neg = v < 0n;
+  const abs = neg ? -v : v;
+  const rupees = (abs / 100n).toString();
+  const frac = (abs % 100n).toString().padStart(2, '0');
+  const head = rupees.slice(0, -3);
+  const grouped = head ? `${head.replace(/\B(?=(\d{2})+$)/g, ',')},${rupees.slice(-3)}` : rupees;
+  return `${neg ? '-' : ''}₹${grouped}.${frac}`;
 }
 
 export const issueRefundSchema = z.strictObject({
