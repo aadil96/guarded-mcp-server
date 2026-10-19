@@ -29,7 +29,7 @@ describe('strictness is enforced when a tool is defined', () => {
     expect(() => assertStrict(z.strictObject({ n: z.array(z.object({})) }))).toThrow(/input.n\[\] must be/);
   });
   it('rejects a non-strict write tool schema and a schema that declares idempotency_key itself', () => {
-    const base = { name: 'issue_refund' as const, description: 'x', summarize: async () => 's', execute: async () => ({ ok: true as const, result: {} }) };
+    const base = { name: 'issue_refund' as const, scope: 'refund:request' as const, description: 'x', summarize: async () => 's', execute: async () => ({ ok: true as const, result: {} }) };
     expect(() => defineWriteTool({ ...base, input: z.object({ a: z.string() }) })).toThrow(/strict object/);
     expect(() => defineWriteTool({ ...base, input: z.strictObject({ idempotency_key: z.string() }) })).toThrow(/must not declare idempotency_key/);
   });
@@ -178,12 +178,12 @@ describe('defineWriteTool over MCP on the approvals module', () => {
   it('a transforming schema is refused at definition; an async-refined one requests, is approved and executes', async () => {
     const execute = (tx: Parameters<typeof issueRefund.execute>[0], _a: unknown, approval: Parameters<typeof issueRefund.execute>[1]) => issueRefund.execute(tx, approval);
     expect(() => defineWriteTool({
-      name: 'issue_refund', description: 'x', input: z.strictObject({ amount_paise: z.string().transform(Number) }),
+      name: 'issue_refund', scope: 'refund:request', description: 'x', input: z.strictObject({ amount_paise: z.string().transform(Number) }),
       summarize: async () => 's', execute,
     })).toThrow(/uses a transform/);
     let seen: unknown;
     const asyncRefined = defineWriteTool({
-      name: 'issue_refund', description: 'x',
+      name: 'issue_refund', scope: 'refund:request', description: 'x',
       input: z.strictObject({ invoice_id: z.uuid(), amount_paise: z.number().int().positive(), reason: z.string().refine(async (v) => v.length >= 3) }),
       summarize: async (_db, a) => `refund ${a.amount_paise} paise`,
       execute: async (tx, a, approval) => { seen = a; return issueRefund.execute(tx, approval); },
@@ -201,7 +201,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
 
   it('a summarize that throws is still audited (internal_error) and creates no approval', async () => {
     const broken = defineWriteTool({
-      name: 'issue_refund', description: 'x', input: issueRefundSchema,
+      name: 'issue_refund', scope: 'refund:request', description: 'x', input: issueRefundSchema,
       summarize: async () => { throw new Error('lookup failed'); },
       execute: (tx, _a, approval) => issueRefund.execute(tx, approval),
     });

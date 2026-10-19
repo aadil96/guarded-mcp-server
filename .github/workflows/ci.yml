@@ -44,3 +44,5 @@ jobs:
         run: pnpm verify:seed
       - name: Smoke test the stdio server on real Postgres 16
         run: pnpm smoke "$(pnpm -s tsx -e "import {seedId} from './src/db/seed.ts'; console.log(seedId('order:4'))")"
+      - name: Smoke test the HTTP server on real Postgres 16
+        run: pnpm smoke:http "$(pnpm -s tsx -e "import {seedId} from './src/db/seed.ts'; console.log(seedId('invoice:3'))")"

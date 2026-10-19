@@ -6,7 +6,7 @@ An MCP server for a **fake** wholesale business database (Meridian Supply Co.). 
 
 ## Status
 
-Work in progress. The tools run over stdio (`pnpm start`). `issue_refund` only creates a pending approval; a human approves, denies and executes it with the approvals console:
+Work in progress. The tools run over stdio (`pnpm start`) or Streamable HTTP (`MCP_TRANSPORT=http pnpm start`, below). `issue_refund` only creates a pending approval; a human approves, denies and executes it with the approvals console:
 
 ```sh
 APPROVER_ACTOR=alice APPROVER_ROLE=admin pnpm approvals list
@@ -33,6 +33,23 @@ All read tools are annotated `readOnlyHint: true`; `issue_refund` is `destructiv
 | `issue_refund` | Requests a refund on an invoice. Returns `pending_approval` with an `approvalId`; nothing is refunded until a human approves it | `idempotency_key` required; reuse it on retry. Needs `MCP_ROLE=operator` |
 
 `pnpm start` needs `DATABASE_URL` and refuses to start without it. Every connection runs as `meridian_app`; if `SET ROLE meridian_app` fails or `current_user` is anything else, the server exits 1. `MCP_ACTOR` (default `local-dev`) and `MCP_ROLE` (`reader` or `operator`) set the audit identity.
+
+## HTTP transport (local and demo use)
+
+```sh
+pnpm mint-token alice refund:request     # prints the raw token once, and its sha256 config line
+# put only the config line in tokens.conf (git-ignored); give the raw token to the client
+MCP_TRANSPORT=http MCP_HTTP_TOKENS_FILE=tokens.conf DATABASE_URL=… pnpm start
+```
+
+- Serves `POST /mcp` with the SDK's Streamable HTTP transport, stateless (no sessions, so `GET`/`DELETE` are `405`). Binds `127.0.0.1:3333` by default (`MCP_HTTP_HOST`, `MCP_HTTP_PORT`).
+- Clients send `Authorization: Bearer <token>`. The config (`MCP_HTTP_TOKENS_FILE`, or the same lines inline in `MCP_HTTP_TOKENS`) holds only SHA-256 hashes, one `sha256:<hex> <actor> <scopes>` per line. Tokens are compared in constant time. The server refuses to start with no tokens or any malformed line.
+- Scopes: `read` gives the reader role; `refund:request` (which includes `read`) gives the operator role. No scope gives `admin`: approving and executing stay in the approvals console. The audit actor and role come from the token, never from tool arguments.
+- Every token sees the same `tools/list` as stdio. A `tools/call` outside the token's scopes is refused with `insufficient_scope` and audited once.
+- Before any tool runs, requests are refused with `401` (missing or bad token, with a `WWW-Authenticate: Bearer` challenge), `403` (a `Host` or browser `Origin` outside the localhost allowlist, against DNS rebinding; extend with `MCP_HTTP_ALLOWED_HOSTS` / `MCP_HTTP_ALLOWED_ORIGINS`) or `413` (body over 1 MiB). No CORS headers are sent.
+- These refusals are written to `audit_events` (actor `anonymous`, no header values). Each IP gets a burst of 10 rows refilled at 10 a minute; beyond that the request is still refused but not audited, and the dropped count goes into one `rejections_dropped` row a minute.
+
+Static bearer tokens are for local and demo use. A real multi-user deployment should use the MCP specification's OAuth 2.1 authorization (an authorization server, audience-bound short-lived tokens, protected resource metadata), which this project does not implement.
 
 ## Non-goals (v1)
 

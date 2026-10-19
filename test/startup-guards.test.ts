@@ -16,6 +16,29 @@ describe('fails closed without a database URL', () => {
   });
 });
 
+describe('HTTP transport fails closed on token config', () => {
+  const hash = 'a'.repeat(64);
+  it('exits 1 with no tokens configured, before touching the database', async () => {
+    const { code, stderr } = await startServer({ MCP_TRANSPORT: 'http', MCP_HTTP_TOKENS: '', MCP_HTTP_TOKENS_FILE: '', DATABASE_URL: '' });
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/refusing to start, HTTP token config: no tokens configured/);
+  });
+
+  it('exits 1 on a malformed or admin-scoped token line, without echoing it', async () => {
+    for (const cfg of ['gms_SECRETRAW alice read', `sha256:${hash} root admin`]) {
+      const { code, stderr } = await startServer({ MCP_TRANSPORT: 'http', MCP_HTTP_TOKENS: cfg, DATABASE_URL: '' });
+      expect(code).toBe(1);
+      expect(stderr).toMatch(/refusing to start, HTTP token config: token config line 1/);
+      expect(stderr).not.toContain('SECRETRAW');
+    }
+  });
+
+  it('exits 1 on an unknown MCP_TRANSPORT', async () => {
+    const { code } = await startServer({ MCP_TRANSPORT: 'websocket', DATABASE_URL: '' });
+    expect(code).toBe(1);
+  });
+});
+
 describe('fail-closed tests are not skipped in CI', () => {
   it('CI sets DATABASE_URL, so the real-Postgres suites run', () => {
     if (process.env.CI) expect(process.env.DATABASE_URL, 'CI must run against real Postgres').toBeTruthy();
