@@ -61,7 +61,7 @@ export type AuthResult = { ok: true; caller: TokenCaller } | { ok: false; reason
  * with every entry in constant time (no early exit), so timing doesn't reveal which hash or prefix matched.
  */
 export function authenticate(header: string | undefined, entries: readonly TokenEntry[]): AuthResult {
-  const m = header === undefined ? null : /^Bearer ([\x21-\x7e]{1,512})$/.exec(header);
+  const m = header === undefined ? null : /^Bearer ([\x21-\x7e]{1,512})$/i.exec(header);
   if (!m) return { ok: false, reason: header === undefined ? 'missing_token' : 'invalid_token' };
   const presented = createHash('sha256').update(m[1], 'utf8').digest();
   let match: TokenEntry | undefined;

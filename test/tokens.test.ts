@@ -43,9 +43,13 @@ describe('authenticate', () => {
     expect(minted.line).not.toContain(minted.token);
     expect(authenticate(`Bearer ${minted.token}`, entries)).toEqual({ ok: true, caller: { actor: 'bob', role: 'reader', scopes: ['read'] } });
   });
+  it('matches the Bearer scheme case-insensitively (RFC 9110) but the token exactly', () => {
+    for (const scheme of ['bearer', 'BEARER', 'bEaReR']) expect(authenticate(`${scheme} ${minted.token}`, entries).ok).toBe(true);
+    expect(authenticate(`Bearer ${minted.token.toUpperCase()}`, entries)).toEqual({ ok: false, reason: 'invalid_token' });
+  });
   it('rejects missing, wrong, non-Bearer and oversized headers', () => {
     expect(authenticate(undefined, entries)).toEqual({ ok: false, reason: 'missing_token' });
-    for (const hdr of ['', `Bearer ${minted.token}x`, `bearer ${minted.token}`, `Basic ${minted.token}`, `Bearer ${'a'.repeat(513)}`, `Bearer ${minted.token} extra`]) {
+    for (const hdr of ['', `Bearer ${minted.token}x`, `Basic ${minted.token}`, `Bearer ${'a'.repeat(513)}`, `Bearer ${minted.token} extra`]) {
       expect(authenticate(hdr, entries)).toEqual({ ok: false, reason: 'invalid_token' });
     }
   });
