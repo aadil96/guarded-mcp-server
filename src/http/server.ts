@@ -101,7 +101,7 @@ export function startHttpServer(opts: HttpOptions) {
     const { caller } = auth;
     // Stateless: no session to resume, so no GET stream and no DELETE.
     if (method !== 'POST') {
-      return reject(res, { ip, method, status: 405, errorCode: 'method_not_allowed', actor: caller.actor }, { error: 'method_not_allowed' }, { allow: 'POST' });
+      return reject(res, { ip, method, status: 405, errorCode: 'method_not_allowed', caller }, { error: 'method_not_allowed' }, { allow: 'POST' });
     }
     let body: Buffer;
     try {
@@ -109,7 +109,7 @@ export function startHttpServer(opts: HttpOptions) {
     } catch (e) {
       if (!(e instanceof TooLarge)) throw e;
       res.setHeader('connection', 'close');
-      return reject(res, { ip, method, status: 413, errorCode: 'body_too_large', actor: caller.actor }, { error: 'body_too_large', maxBytes: maxBody });
+      return reject(res, { ip, method, status: 413, errorCode: 'body_too_large', caller }, { error: 'body_too_large', maxBytes: maxBody });
     }
 
     const headers = new Headers();

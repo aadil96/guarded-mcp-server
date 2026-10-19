@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { writeAudit } from '../audit/log.js';
+import type { TokenCaller } from '../auth/tokens.js';
 import { inAppTx } from '../db/index.js';
 import type { AppDb } from '../db/types.js';
 
@@ -7,7 +8,8 @@ export type Rejection = {
   ip: string;
   status: number;
   errorCode: 'missing_token' | 'invalid_token' | 'invalid_host' | 'forbidden_origin' | 'body_too_large' | 'method_not_allowed';
-  actor?: string;
+  /** The authenticated caller, for refusals after the token check; absent before it. */
+  caller?: Pick<TokenCaller, 'actor' | 'role'>;
   method: string;
 };
 
@@ -71,7 +73,7 @@ export class RejectionAuditor {
     }
     const startedAt = performance.now();
     await inAppTx(this.db, (tx) => writeAudit(tx, {
-      actor: r.actor ?? 'anonymous', role: 'invalid', tool: 'http', outcome: 'denied', startedAt,
+      actor: r.caller?.actor ?? 'anonymous', role: r.caller?.role ?? 'invalid', tool: 'http', outcome: 'denied', startedAt,
       correlationId: randomUUID(), errorCode: r.errorCode, args: { ip: r.ip, status: r.status, method: r.method },
     }));
     return true;

@@ -173,19 +173,20 @@ describe('HTTP transport: request guards', () => {
     expect(declared.status).toBe(413);
     // The declared size is checked before authentication, so an anonymous oversized request never gets read.
     expect((await post({}, big)).status).toBe(413);
-    expect(await lastAudit()).toMatchObject({ actor: 'anonymous', error_code: 'body_too_large' });
+    expect(await lastAudit()).toMatchObject({ actor: 'anonymous', role: 'invalid', error_code: 'body_too_large' });
     const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(big)); c.close(); } });
     const streamed = await fetch(srv.url, {
       method: 'POST', body: stream, duplex: 'half',
       headers: { authorization: `Bearer ${operator.token}`, 'content-type': 'application/json' },
     } as RequestInit);
     expect(streamed.status).toBe(413);
-    expect(await lastAudit()).toMatchObject({ actor: 'alice', error_code: 'body_too_large' });
+    expect(await lastAudit()).toMatchObject({ actor: 'alice', role: 'operator', error_code: 'body_too_large' });
   });
 
   it('refuses GET and DELETE (stateless: no session streams)', async () => {
     const r = await fetch(srv.url, { method: 'GET', headers: { authorization: `Bearer ${reader.token}` } });
     expect(r.status).toBe(405);
+    expect(await lastAudit()).toMatchObject({ actor: 'reader-bot', role: 'reader', error_code: 'method_not_allowed' });
   });
 });
 
