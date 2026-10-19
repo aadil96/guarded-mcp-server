@@ -3,6 +3,16 @@ import type { AuditOutcome, AuditRole, Sql } from './types.js';
 
 const SENSITIVE = /(email|phone|gstin|token|secret|password|api[_-]?key)/i;
 
+/** jsonb rejects U+0000 and unpaired surrogate escapes; replace both (after any slicing) with U+FFFD. */
+export const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+const jsonbSafe = (s: string) => s.replaceAll('\u0000', '\uFFFD').replace(LONE_SURROGATE, '\uFFFD');
+
+/** Sanitizing can map distinct keys onto one; never overwrite, suffix instead so no value is dropped. */
+function uniqueKey(out: Record<string, unknown>, k: string): string {
+  if (!Object.hasOwn(out, k)) return k;
+  for (let i = 2; ; i++) if (!Object.hasOwn(out, `${k}#${i}`)) return `${k}#${i}`;
+}
+
 const MAX_DEPTH = 8;
 const MAX_KEYS = 100;
 const MAX_NODES = 2000;
@@ -25,8 +35,8 @@ function walk(value: unknown, depth: number, w: Walk): unknown {
   if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
   if (typeof value === 'bigint') return `${value.toString()}n`;
   if (typeof value === 'string') {
-    const v = value.replaceAll('\u0000', '\uFFFD'); // jsonb rejects U+0000
-    return v.length > 200 ? `${v.slice(0, 200)}…` : v;
+    const v = value.length > 200 ? `${value.slice(0, 200)}…` : value;
+    return jsonbSafe(v);
   }
   if (typeof value === 'undefined') return null;
   if (typeof value !== 'object') return `[${typeof value}]`;
@@ -41,7 +51,7 @@ function walk(value: unknown, depth: number, w: Walk): unknown {
       if (w.budget <= 0) { out['…'] = '[truncated]'; break; }
       let v: unknown;
       try { v = (value as Record<string, unknown>)[k]; } catch { v = '[unreadable]'; }
-      out[k.replaceAll('\u0000', '\uFFFD')] = SENSITIVE.test(k) ? '[redacted]' : walk(v, depth + 1, w);
+      out[uniqueKey(out, jsonbSafe(k))] = SENSITIVE.test(k) ? '[redacted]' : walk(v, depth + 1, w);
     }
     return out;
   } finally {

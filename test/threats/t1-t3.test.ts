@@ -496,4 +496,28 @@ describe('runtime input hardening (Codex re-review)', () => {
       expect(await n('audit_events')).toBe(auditBefore + 1);
     }
   });
+
+  it('lone surrogates in rejected args or the reason are audited rejections, never a thrown jsonb insert', async () => {
+    const inv = await sharedInv();
+    const cases = [
+      { ...refundArgs(inv.id, 108), extra: 'x\uD800y' },
+      { ...refundArgs(inv.id, 108), ['k\uDC00']: 1 },
+      { ...refundArgs(inv.id, 108), extra: `${'a'.repeat(199)}\uD83D\uDE00` }, // pair split by the 200-char cut
+      { ...refundArgs(inv.id, 108), reason: 'r\uD800' },
+    ];
+    for (const [i, args] of cases.entries()) {
+      const auditBefore = await n('audit_events');
+      const r = await requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: `surrogate-${i}` });
+      expect(r.kind).toBe('invalid_args');
+      expect(await n('audit_events')).toBe(auditBefore + 1);
+    }
+  });
+
+  it('keys that collide after sanitizing are all kept in the audit row', async () => {
+    const inv = await sharedInv();
+    const args = { ...refundArgs(inv.id, 109), ['a\u0000']: 'first', ['a\uFFFD']: 'second' };
+    expect((await requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 'key-collide' })).kind).toBe('invalid_args');
+    const a = await ctx.client.query<{ arguments: Record<string, unknown> }>(`select arguments from audit_events where idempotency_key = 'key-collide'`);
+    expect(Object.values(a.rows[0].arguments)).toEqual(expect.arrayContaining(['first', 'second']));
+  });
 });
