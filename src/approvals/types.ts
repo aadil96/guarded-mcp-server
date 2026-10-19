@@ -21,8 +21,6 @@ export type Approval = {
   result: unknown;
 };
 
-export type Caller = { actor: string; role: Role; correlationId?: string };
-
 export type RequestWriteResult =
   | { kind: 'pending'; approvalId: string; summary: string; approval: Approval }
   | { kind: 'duplicate'; approvalId: string; status: ApprovalStatus; result: unknown }
