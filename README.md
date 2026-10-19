@@ -10,7 +10,7 @@ Work in progress. The read tools run over stdio (`pnpm start`). Write tools and 
 
 ## Tools
 
-All read tools are annotated `readOnlyHint: true`. Annotations are hints: clients must not trust them from servers they don't trust. Every `tools/call` writes one `audit_events` row, including calls the SDK rejects for invalid arguments (`error_code` `invalid_args`). The server's Postgres connections run `SET ROLE meridian_app`, so the least-privilege grants and append-only audit rules apply at runtime.
+All read tools are annotated `readOnlyHint: true`; `issue_refund` is `destructiveHint: true`, `idempotentHint: true`. Annotations are hints: clients must not trust them from servers they don't trust. Every `tools/call` writes one `audit_events` row, including calls the SDK rejects for invalid arguments (`error_code` `invalid_args`). The server's Postgres connections run `SET ROLE meridian_app`, so the least-privilege grants and append-only audit rules apply at runtime.
 
 | Tool | What it does | Limits |
 |---|---|---|
@@ -22,6 +22,7 @@ All read tools are annotated `readOnlyHint: true`. Annotations are hints: client
 | `get_invoice` | One invoice by id | |
 | `search_orders` | Text search on order number or customer name | parameterized, wildcards matched literally, max 50 |
 | `list_pending_approvals` | Write requests waiting for a human | max 50 |
+| `issue_refund` | Requests a refund on an invoice. Returns `pending_approval` with an `approvalId`; nothing is refunded until a human approves it | `idempotency_key` required; reuse it on retry. Needs `MCP_ROLE=operator` |
 
 `pnpm start` needs `DATABASE_URL` and refuses to start without it. Every connection runs as `meridian_app`; if `SET ROLE meridian_app` fails or `current_user` is anything else, the server exits 1. `MCP_ACTOR` (default `local-dev`) and `MCP_ROLE` (`reader` or `operator`) set the audit identity.
 
