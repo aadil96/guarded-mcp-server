@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { argsHash } from '../db/args-hash.js';
 import { type ApprovalsConfig, defaultApprovalsConfig } from './config.js';
-import { writeAudit } from './audit.js';
+import { LONE_SURROGATE, writeAudit } from './audit.js';
 import { issueRefund } from './refund.js';
 import type {
   Approval, Caller, Role, Db, ExecuteResult, HandlerMap, RequestWriteResult, ResolveResult, Sql, WriteTool,
@@ -21,11 +21,14 @@ export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID
 export const MAX_IDEMPOTENCY_KEY_BYTES = 200;
 
 /** Caller metadata is validated on its own so a bad actor/role/correlationId can never break the audit insert. */
+/** Text Postgres stores exactly as given: no U+0000 and no unpaired surrogates (Node would send U+FFFD, so identities and keys would alias). */
+const isPgExact = (v: string) => !v.includes('\u0000') && !new RegExp(LONE_SURROGATE.source).test(v);
+
 const callerSchema = z.object({
   // Postgres text/jsonb cannot hold U+0000; a NUL here would make the audit insert itself throw.
-  actor: z.string().trim().min(1).max(200).refine((v) => !v.includes('\u0000')),
+  actor: z.string().trim().min(1).max(200).refine(isPgExact),
   role: z.enum(['reader', 'operator', 'admin']),
-  correlationId: z.string().min(1).max(200).refine((v) => !v.includes('\u0000')).optional(),
+  correlationId: z.string().min(1).max(200).refine(isPgExact).optional(),
 });
 type CallerCheck =
   | { ok: true; actor: string; role: Role; correlationId: string }
@@ -58,7 +61,7 @@ export async function requestWrite(
   // Whole-request guard: null/undefined/non-object requests reach the audited invalid-caller branch.
   const req = (input && typeof input === 'object' ? input : {}) as Partial<typeof input>;
   const rawKey: unknown = req.idempotencyKey;
-  const auditKey = typeof rawKey === 'string' && !rawKey.includes('\u0000') && Buffer.byteLength(rawKey, 'utf8') <= MAX_IDEMPOTENCY_KEY_BYTES ? rawKey : null;
+  const auditKey = typeof rawKey === 'string' && isPgExact(rawKey) && Buffer.byteLength(rawKey, 'utf8') <= MAX_IDEMPOTENCY_KEY_BYTES ? rawKey : null;
   const base = { actor: caller.actor, role: caller.role, tool: typeof req.tool === 'string' ? req.tool.slice(0, 200).replaceAll('\u0000', '\uFFFD') : '[invalid]', args: req.args ?? null, idempotencyKey: auditKey, startedAt, correlationId };
   if (!caller.ok) {
     await db.transaction((tx) => writeAudit(tx, { ...base, outcome: 'error', errorCode: 'invalid_args' }));
@@ -73,7 +76,7 @@ export async function requestWrite(
   // Runtime callers can bypass the TS type; reject a missing/blank key before it reaches the approvals query.
   const key: unknown = input.idempotencyKey;
   // Bounded so it always fits the (tool, idempotency_key) unique index.
-  if (typeof key !== 'string' || key.trim().length === 0 || key.includes('\u0000') || Buffer.byteLength(key, 'utf8') > MAX_IDEMPOTENCY_KEY_BYTES) {
+  if (typeof key !== 'string' || key.trim().length === 0 || !isPgExact(key) || Buffer.byteLength(key, 'utf8') > MAX_IDEMPOTENCY_KEY_BYTES) {
     await db.transaction((tx) => writeAudit(tx, { ...base, idempotencyKey: null, outcome: 'error', errorCode: 'invalid_args' }));
     return { kind: 'invalid_args', issues: [{ code: 'custom', path: ['idempotencyKey'], message: `idempotency key must be a non-empty string of at most ${MAX_IDEMPOTENCY_KEY_BYTES} UTF-8 bytes` } as z.core.$ZodIssue] };
   }

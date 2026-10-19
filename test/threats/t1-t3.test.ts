@@ -520,4 +520,30 @@ describe('runtime input hardening (Codex re-review)', () => {
     const a = await ctx.client.query<{ arguments: Record<string, unknown> }>(`select arguments from audit_events where idempotency_key = 'key-collide'`);
     expect(Object.values(a.rows[0].arguments)).toEqual(expect.arrayContaining(['first', 'second']));
   });
+
+  it('a lone surrogate in actor cannot alias the requester to bypass self-approval', async () => {
+    const inv = await sharedInv();
+    const r = await requestWrite(db, { actor: 'eve\uFFFD', role: 'admin', tool: 'issue_refund', args: refundArgs(inv.id, 110), idempotencyKey: 'alias-actor' });
+    if (r.kind !== 'pending') throw new Error(r.kind);
+    const auditBefore = await n('audit_events');
+    // Would previously be treated as a different actor and approved.
+    expect(await resolveApproval(db, { actor: 'eve\uD800', role: 'admin', approvalId: r.approvalId, decision: 'approve' })).toEqual({ kind: 'invalid_args' });
+    expect(await n('audit_events')).toBe(auditBefore + 1);
+    expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'invalid_args' });
+    const st = await ctx.client.query<{ status: string }>('select status from approvals where id = $1', [r.approvalId]);
+    expect(st.rows[0].status).toBe('pending');
+    expect((await requestWrite(db, { actor: 'x\uDC00', role: 'operator', tool: 'issue_refund', args: refundArgs(inv.id, 110), idempotencyKey: 'alias-actor-2' })).kind).toBe('invalid_args');
+    expect((await executeApproval(db, r.approvalId, { actor: 'y\uD800', role: 'admin' })).kind).toBe('invalid_args');
+  });
+
+  it('idempotency keys with lone surrogates are rejected so they cannot alias U+FFFD keys', async () => {
+    const inv = await sharedInv();
+    expect((await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 111), idempotencyKey: 'alias-\uFFFD' })).kind).toBe('pending');
+    const approvalsBefore = await n('approvals');
+    const auditBefore = await n('audit_events');
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 112), idempotencyKey: 'alias-\uD800' });
+    expect(r.kind).toBe('invalid_args');
+    expect(await n('approvals')).toBe(approvalsBefore);
+    expect(await n('audit_events')).toBe(auditBefore + 1);
+  });
 });
