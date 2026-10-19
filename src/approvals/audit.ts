@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AuditOutcome, Role, Sql } from './types.js';
+import type { AuditOutcome, AuditRole, Sql } from './types.js';
 
 const SENSITIVE = /(email|phone|gstin|token|secret|password|api[_-]?key)/i;
 
@@ -15,7 +15,7 @@ export function redact(value: unknown): unknown {
 }
 
 export type AuditEntry = {
-  actor: string; role: Role; tool: string; args: unknown; outcome: AuditOutcome;
+  actor: string; role: AuditRole; tool: string; args: unknown; outcome: AuditOutcome;
   approvalId?: string | null; idempotencyKey?: string | null; startedAt: number; correlationId: string; errorCode?: string | null;
 };
 

@@ -2,6 +2,8 @@ import type { z } from 'zod';
 
 export type WriteTool = 'issue_refund' | 'update_order_status' | 'create_credit_note' | 'add_customer_note';
 export type Role = 'reader' | 'operator' | 'admin';
+/** Role as recorded in audit_events: a real role, or the placeholder for invalid caller metadata. */
+export type AuditRole = Role | 'invalid';
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'executed' | 'failed';
 export type AuditOutcome = 'ok' | 'error' | 'denied' | 'pending_approval' | 'duplicate' | 'conflict';
 

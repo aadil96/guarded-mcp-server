@@ -364,4 +364,47 @@ describe('runtime input hardening (Codex re-review)', () => {
     if (r.kind !== 'pending') throw new Error(r.kind);
     expect(r.summary).toBe(`Refund ₹9,00,71,99,25,47,409.91 on ${inv.number}`);
   });
+
+  it('rejects an idempotency key over 200 UTF-8 bytes as invalid_args, audited, no approval', async () => {
+    const inv = await sharedInv();
+    const ok = 'é'.repeat(100); // exactly 200 bytes
+    expect((await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 103), idempotencyKey: ok })).kind).toBe('pending');
+    for (const key of ['é'.repeat(101), 'k'.repeat(201), 'x'.repeat(100_000)]) {
+      const approvalsBefore = await n('approvals');
+      const auditBefore = await n('audit_events');
+      const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 103), idempotencyKey: key });
+      expect(r.kind).toBe('invalid_args');
+      expect(await n('approvals')).toBe(approvalsBefore);
+      expect(await n('audit_events')).toBe(auditBefore + 1);
+      expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'invalid_args', approval_id: null });
+    }
+  });
+
+  const badCallers: [string, Record<string, unknown>][] = [
+    ['missing role', { actor: 'x' }], ['unknown role', { actor: 'x', role: 'root' }],
+    ['missing actor', { role: 'admin' }], ['blank actor', { actor: '  ', role: 'admin' }],
+    ['non-string correlationId', { actor: 'x', role: 'admin', correlationId: 7 }],
+  ];
+  for (const [label, bad] of badCallers) {
+    it(`invalid caller metadata (${label}) is audited with placeholders and returns invalid_args on every entry point`, async () => {
+      const inv = await sharedInv();
+      const p = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 104), idempotencyKey: `caller-${label}` });
+      if (p.kind !== 'pending') throw new Error(p.kind);
+      const calls = [
+        () => requestWrite(db, { ...bad, tool: 'issue_refund', args: refundArgs(inv.id, 105), idempotencyKey: `caller-bad-${label}` } as never),
+        () => resolveApproval(db, { ...bad, approvalId: p.approvalId, decision: 'approve' } as never),
+        () => executeApproval(db, p.approvalId, bad as never),
+      ];
+      for (const call of calls) {
+        const auditBefore = await n('audit_events');
+        expect((await call()).kind).toBe('invalid_args');
+        expect(await n('audit_events')).toBe(auditBefore + 1);
+        const a = await ctx.client.query<{ actor: string; role: string; outcome: string; error_code: string }>(
+          'select actor, role, outcome, error_code from audit_events order by created_at desc, ctid desc limit 1');
+        expect(a.rows[0]).toEqual({ actor: 'unknown', role: 'invalid', outcome: 'error', error_code: 'invalid_args' });
+      }
+      const st = await ctx.client.query<{ status: string }>('select status from approvals where id = $1', [p.approvalId]);
+      expect(st.rows[0].status).toBe('pending');
+    });
+  }
 });

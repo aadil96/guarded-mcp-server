@@ -15,6 +15,13 @@
       "when": 1792080578129,
       "tag": "0001_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792388788356,
+      "tag": "0002_audit_invalid_role",
+      "breakpoints": true
     }
   ]
 }

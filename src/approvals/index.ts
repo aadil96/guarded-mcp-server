@@ -5,7 +5,7 @@ import { type ApprovalsConfig, defaultApprovalsConfig } from './config.js';
 import { writeAudit } from './audit.js';
 import { issueRefund } from './refund.js';
 import type {
-  Approval, Caller, Db, ExecuteResult, HandlerMap, RequestWriteResult, ResolveResult, Sql, WriteTool,
+  Approval, Caller, Role, Db, ExecuteResult, HandlerMap, RequestWriteResult, ResolveResult, Sql, WriteTool,
 } from './types.js';
 
 export * from './types.js';
@@ -18,6 +18,27 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** Reject malformed ids before they reach Postgres (which would throw 22P02 and skip the audit row). */
 export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v);
 
+export const MAX_IDEMPOTENCY_KEY_BYTES = 200;
+
+/** Caller metadata is validated on its own so a bad actor/role/correlationId can never break the audit insert. */
+const callerSchema = z.object({
+  actor: z.string().trim().min(1).max(200),
+  role: z.enum(['reader', 'operator', 'admin']),
+  correlationId: z.string().min(1).max(200).optional(),
+});
+type CallerCheck =
+  | { ok: true; actor: string; role: Role; correlationId: string }
+  | { ok: false; actor: 'unknown'; role: 'invalid'; correlationId: string };
+function checkCaller(input: unknown): CallerCheck {
+  const c = callerSchema.safeParse(input && typeof input === 'object'
+    ? { actor: (input as Caller).actor, role: (input as Caller).role, correlationId: (input as Caller).correlationId }
+    : {});
+  return c.success
+    ? { ok: true, actor: c.data.actor, role: c.data.role, correlationId: c.data.correlationId ?? randomUUID() }
+    : { ok: false, actor: 'unknown', role: 'invalid', correlationId: randomUUID() };
+}
+const callerIssue = { code: 'custom', path: ['caller'], message: 'invalid caller metadata (actor, role or correlationId)' } as z.core.$ZodIssue;
+
 const getApproval = async (sql: Sql, id: string) =>
   (await sql.query<Approval>('select * from approvals where id = $1', [id])).rows[0];
 
@@ -27,19 +48,27 @@ export async function requestWrite(
   handlers: HandlerMap = defaultHandlers,
 ): Promise<RequestWriteResult> {
   const startedAt = performance.now();
-  const correlationId = input.correlationId ?? randomUUID();
-  const base = { actor: input.actor, role: input.role, tool: input.tool, args: input.args, idempotencyKey: input.idempotencyKey, startedAt, correlationId };
+  const caller = checkCaller(input);
+  const correlationId = caller.correlationId;
+  const rawKey: unknown = input.idempotencyKey;
+  const auditKey = typeof rawKey === 'string' && Buffer.byteLength(rawKey, 'utf8') <= MAX_IDEMPOTENCY_KEY_BYTES ? rawKey : null;
+  const base = { actor: caller.actor, role: caller.role, tool: String(input.tool), args: input.args ?? null, idempotencyKey: auditKey, startedAt, correlationId };
+  if (!caller.ok) {
+    await db.transaction((tx) => writeAudit(tx, { ...base, outcome: 'error', errorCode: 'invalid_args' }));
+    return { kind: 'invalid_args', issues: [callerIssue] };
+  }
   const handler = handlers[input.tool];
-  if (input.role === 'reader' || !handler) {
+  if (caller.role === 'reader' || !handler) {
     const reason = !handler ? 'tool_not_supported' : 'role_not_permitted';
     await writeAudit(db, { ...base, outcome: 'denied', errorCode: reason });
     return { kind: 'denied', reason };
   }
   // Runtime callers can bypass the TS type; reject a missing/blank key before it reaches the approvals query.
   const key: unknown = input.idempotencyKey;
-  if (typeof key !== 'string' || key.trim().length === 0) {
+  // Bounded so it always fits the (tool, idempotency_key) unique index.
+  if (typeof key !== 'string' || key.trim().length === 0 || Buffer.byteLength(key, 'utf8') > MAX_IDEMPOTENCY_KEY_BYTES) {
     await db.transaction((tx) => writeAudit(tx, { ...base, idempotencyKey: null, outcome: 'error', errorCode: 'invalid_args' }));
-    return { kind: 'invalid_args', issues: [{ code: 'custom', path: ['idempotencyKey'], message: 'idempotency key must be a non-empty string', input: key } as z.core.$ZodIssue] };
+    return { kind: 'invalid_args', issues: [{ code: 'custom', path: ['idempotencyKey'], message: `idempotency key must be a non-empty string of at most ${MAX_IDEMPOTENCY_KEY_BYTES} UTF-8 bytes` } as z.core.$ZodIssue] };
   }
   const parsed = handler.schema.safeParse(input.args);
   if (!parsed.success) {
@@ -79,7 +108,7 @@ export async function requestWrite(
       `insert into approvals (id, tool, idempotency_key, args_hash, arguments, summary, requested_by)
        values ($1,$2,$3,$4,$5,$6,$7)
        on conflict (tool, idempotency_key) do nothing returning *`,
-      [randomUUID(), input.tool, input.idempotencyKey, hash, JSON.stringify(args), summary, input.actor],
+      [randomUUID(), input.tool, input.idempotencyKey, hash, JSON.stringify(args), summary, caller.actor],
     );
     if (inserted.rows[0]) await writeAudit(tx, { ...base, outcome: 'pending_approval', approvalId: inserted.rows[0].id });
     return inserted.rows[0];
@@ -106,9 +135,10 @@ export function resolveApproval(db: Db, input: ResolveInput): Promise<ResolveRes
 
 async function resolveApprovalWith(config: ApprovalsConfig, db: Db, input: ResolveInput): Promise<ResolveResult> {
   const startedAt = performance.now();
-  const correlationId = input.correlationId ?? randomUUID();
-  const base = { actor: input.actor, role: input.role, tool: 'resolve_approval', args: { approvalId: input.approvalId, decision: input.decision }, approvalId: null as string | null, startedAt, correlationId };
-  if (!resolveInputSchema.safeParse(input).success) {
+  const caller = checkCaller(input);
+  const correlationId = caller.correlationId;
+  const base = { actor: caller.actor, role: caller.role, tool: 'resolve_approval', args: { approvalId: input?.approvalId ?? null, decision: input?.decision ?? null }, approvalId: null as string | null, startedAt, correlationId };
+  if (!caller.ok || !resolveInputSchema.safeParse(input).success) {
     await writeAudit(db, { ...base, outcome: 'error', errorCode: 'invalid_args' });
     return { kind: 'invalid_args' };
   }
@@ -119,8 +149,8 @@ async function resolveApprovalWith(config: ApprovalsConfig, db: Db, input: Resol
   }
   base.approvalId = row.id;
   let reason: string | null = null;
-  if (input.role !== 'admin') reason = 'admin_required';
-  else if (row.requested_by === input.actor && !config.singleOperator) reason = 'self_approval_forbidden';
+  if (caller.role !== 'admin') reason = 'admin_required';
+  else if (row.requested_by === caller.actor && !config.singleOperator) reason = 'self_approval_forbidden';
   if (reason) {
     await writeAudit(db, { ...base, outcome: 'denied', errorCode: reason });
     return { kind: 'denied', reason };
@@ -130,7 +160,7 @@ async function resolveApprovalWith(config: ApprovalsConfig, db: Db, input: Resol
   return db.transaction(async (tx): Promise<ResolveResult> => {
     const upd = await tx.query<Approval>(
       `update approvals set status = $2, resolved_by = $3, resolved_at = now() where id = $1 and status = 'pending' returning *`,
-      [row.id, status, input.actor],
+      [row.id, status, caller.actor],
     );
     if (!upd.rows[0]) {
       const cur = await getApproval(tx, row.id) as Approval;
@@ -145,11 +175,16 @@ async function resolveApprovalWith(config: ApprovalsConfig, db: Db, input: Resol
 export async function executeApproval(
   db: Db,
   approvalId: string,
-  caller: Caller,
+  rawCaller: Caller,
   handlers: HandlerMap = defaultHandlers,
 ): Promise<ExecuteResult> {
   const startedAt = performance.now();
-  const correlationId = caller.correlationId ?? randomUUID();
+  const caller = checkCaller(rawCaller);
+  const correlationId = caller.correlationId;
+  if (!caller.ok) {
+    await writeAudit(db, { actor: caller.actor, role: caller.role, tool: 'execute_approval', args: { approvalId: typeof approvalId === 'string' ? approvalId : null }, outcome: 'error', startedAt, correlationId, errorCode: 'invalid_args' });
+    return { kind: 'invalid_args' };
+  }
   if (caller.role === 'reader') {
     await writeAudit(db, { actor: caller.actor, role: caller.role, tool: 'execute_approval', args: { approvalId }, outcome: 'denied', startedAt, correlationId, errorCode: 'role_not_permitted' });
     return { kind: 'denied', reason: 'role_not_permitted' };
