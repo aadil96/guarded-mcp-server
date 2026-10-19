@@ -81,6 +81,10 @@ export function assertStrict(schema: z.ZodType, path = 'input'): void {
     case 'set':
       assertStrict(def.valueType as z.ZodType, `${path}{}`);
       return;
+    case 'transform':
+      // Arguments are parsed by the SDK, then again by the framework, and stored for approval: parsing must not
+      // change a value's shape, or the second parse rejects the first one's output.
+      throw new Error(`${path} uses a transform; tool inputs must parse to the same shape they accept`);
     default:
       // Leaves hold no objects. Anything else (lazy, promise, function, a future container) can't be checked, so it's refused.
       if (LEAF_TYPES.has(def.type)) return;
@@ -90,7 +94,7 @@ export function assertStrict(schema: z.ZodType, path = 'input'): void {
 
 const LEAF_TYPES = new Set([
   'string', 'number', 'int', 'bigint', 'boolean', 'date', 'symbol', 'null', 'undefined', 'void', 'never', 'any', 'unknown',
-  'nan', 'literal', 'enum', 'template_literal', 'file', 'custom', 'transform', 'success',
+  'nan', 'literal', 'enum', 'template_literal', 'file', 'custom', 'success',
 ]);
 
 const text = (value: unknown, isError = false): CallToolResult =>
@@ -195,16 +199,15 @@ export function mapRequestWriteResult(r: RequestWriteResult): CallToolResult {
 export function defineWriteTool<S extends ToolInput>(spec: WriteToolSpec<S>): DefinedTool {
   assertStrict(spec.input, `${spec.name}.input`);
   if (IDEMPOTENCY_KEY in spec.input.shape) throw new Error(`${spec.name}.input must not declare ${IDEMPOTENCY_KEY}; the framework adds it`);
-  // The approvals module enforces the 200-byte cap and audits a bad key; the schema mirrors it for tools/list.
+  // max(200) counts characters, so it only advertises a bound in tools/list. The real limit is 200 UTF-8 bytes,
+  // enforced (and audited) by requestWrite; a non-ASCII key can pass this schema and still be rejected there.
   const inputSchema = spec.input.extend({ [IDEMPOTENCY_KEY]: z.string().min(1).max(200) }).strict();
   const handler: ToolHandler = {
     schema: spec.input as unknown as z.ZodType<Record<string, unknown>>,
     summarize: (db: AppQueryable, args: Record<string, unknown>) => spec.summarize(db, args as z.output<S>),
-    execute: (tx: AppTx, approval: Approval) => {
-      const args = spec.input.safeParse(approval.arguments);
-      if (!args.success) return Promise.resolve<HandlerOutcome>({ ok: false, error: 'stored_arguments_invalid' });
-      return spec.execute(tx, args.data, approval);
-    },
+    // approval.arguments is the schema's parsed output, stored by requestWrite; inputs have no transforms
+    // (assertStrict), so that output already has the input's shape and is passed through as is.
+    execute: (tx: AppTx, approval: Approval) => spec.execute(tx, approval.arguments as z.output<S>, approval),
   };
   return Object.freeze({
     [toolBrand]: true as const,

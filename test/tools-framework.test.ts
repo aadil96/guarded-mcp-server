@@ -165,6 +165,30 @@ describe('defineWriteTool over MCP on the approvals module', () => {
     } finally { await reader.close(); }
   });
 
+  it('a transforming schema is refused at definition; an async-refined one requests, is approved and executes', async () => {
+    const execute = (tx: Parameters<typeof issueRefund.execute>[0], _a: unknown, approval: Parameters<typeof issueRefund.execute>[1]) => issueRefund.execute(tx, approval);
+    expect(() => defineWriteTool({
+      name: 'issue_refund', description: 'x', input: z.strictObject({ amount_paise: z.string().transform(Number) }),
+      summarize: async () => 's', execute,
+    })).toThrow(/uses a transform/);
+    let seen: unknown;
+    const asyncRefined = defineWriteTool({
+      name: 'issue_refund', description: 'x',
+      input: z.strictObject({ invoice_id: z.uuid(), amount_paise: z.number().int().positive(), reason: z.string().refine(async (v) => v.length >= 3) }),
+      summarize: async (_db, a) => `refund ${a.amount_paise} paise`,
+      execute: async (tx, a, approval) => { seen = a; return issueRefund.execute(tx, approval); },
+    });
+    const c = await mcpClient(db, op, [asyncRefined]);
+    try {
+      const r = await step(() => c.call('issue_refund', args(100, 'mcp-async')));
+      expect(r).toMatchObject({ isError: false, data: { status: 'pending_approval', summary: 'refund 100 paise' } });
+      const id = r.data.approvalId as string;
+      expect((await resolveApproval(db, { ...admin, approvalId: id, decision: 'approve' })).kind).toBe('resolved');
+      expect((await executeApproval(db, id, admin, approvalHandlers([asyncRefined]))).kind).toBe('executed');
+      expect(seen).toEqual({ invoice_id: invoiceId, amount_paise: 100, reason: 'damaged in transit' });
+    } finally { await c.close(); }
+  });
+
   it('a summarize that throws is still audited (internal_error) and creates no approval', async () => {
     const broken = defineWriteTool({
       name: 'issue_refund', description: 'x', input: issueRefundSchema,
