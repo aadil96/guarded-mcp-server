@@ -68,6 +68,13 @@ describe('check-agents-md-enforcers', () => {
     ['only in a step name', 'steps:\n  - name: pnpm check:x\n    run: pnpm typecheck\n  - run: pnpm test\n'],
     ['only in an env value', 'steps:\n  - run: pnpm typecheck\n    env:\n      X: pnpm check:x\n  - run: pnpm test\n'],
     ['after a trailing comment', 'steps:\n  - run: pnpm typecheck # pnpm check:x\n  - run: pnpm test\n'],
+    ['short-circuited by ||', 'steps:\n  - run: true || pnpm check:x\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['as an || fallback', 'steps:\n  - run: pnpm check:x || true\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['inside shell control flow', 'steps:\n  - run: |\n      if false; then\n        pnpm check:x\n      fi\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['in a conditional step', 'steps:\n  - if: github.event_name == \'schedule\'\n    run: pnpm check:x\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['in a continue-on-error step', 'steps:\n  - run: pnpm check:x\n    continue-on-error: true\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['after set +e', 'steps:\n  - run: |\n      set +e\n      pnpm check:x\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['backgrounded or piped', 'steps:\n  - run: pnpm check:x & pnpm typecheck\n  - run: pnpm check:x | tee out && pnpm test\n'],
   ])('a script CI does not execute (%s) does not count', (_name, ci) => {
     const r = check(`${HEAD}| A | \`scripts/check-x.mjs\` |\n`, { '.github/workflows/ci.yml': ci });
     expect(r.code, r.out).toBe(1);
@@ -78,6 +85,7 @@ describe('check-agents-md-enforcers', () => {
     ['a block run', 'steps:\n  - name: checks\n    run: |\n      pnpm typecheck\n      pnpm check:x --strict\n  - run: pnpm test\n'],
     ['node on the path', 'steps:\n  - run: node scripts/check-x.mjs\n  - run: pnpm typecheck && pnpm test\n'],
     ['pnpm run', 'steps:\n  - run: pnpm run check:x\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['an && chain', 'steps:\n  - run: pnpm typecheck && pnpm check:x && pnpm test\n'],
   ])('a script CI executes via %s counts', (_name, ci) => {
     const r = check(`${HEAD}| A | \`scripts/check-x.mjs\` |\n`, { '.github/workflows/ci.yml': ci });
     expect(r.code, r.out).toBe(0);

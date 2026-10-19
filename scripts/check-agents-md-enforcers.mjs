@@ -9,14 +9,15 @@
 // Usage: node scripts/check-agents-md-enforcers.mjs [repoRoot]
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { invocations, readWorkflows } from './lib/workflow.mjs';
+import { enforcing, invocations, readWorkflows } from './lib/workflow.mjs';
 
 const root = resolve(process.argv[2] ?? process.cwd());
 const read = (rel) => readFileSync(join(root, rel), 'utf8');
 const errors = [];
 
-// Only what CI steps execute counts: commands in `run` fields, never comments, names, env or echoed text.
-const ran = readWorkflows(root).flatMap(([, steps]) => steps.flatMap((st) => (st.run ? invocations(st.run) : [])));
+// Only what CI steps are guaranteed to execute counts: plain commands in the `run` field of a step with no
+// `if:` and no continue-on-error. Comments, names, env values, echoed text and shell control flow never count.
+const ran = readWorkflows(root).flatMap(([, steps]) => steps.flatMap((st) => (st.run && enforcing(st) ? invocations(st.run) : [])));
 const scripts = JSON.parse(read('package.json')).scripts ?? {};
 const ciRuns = (name) => ran.some((r) => r.pnpm === name);
 const ciRunsFile = (path) => ran.some((r) => r.file === path)

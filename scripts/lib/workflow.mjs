@@ -56,16 +56,49 @@ function parseStep(lines) {
       step.run = /^[|>][-+]?$/.test(value.trim()) ? body.map((b) => b.trim()).join('\n') : unquote(value);
     } else if (key === 'uses' || key === 'name') {
       step[key] = unquote(value);
+    } else if (key === 'if') {
+      step.conditional = true;
+    } else if (key === 'continue-on-error') {
+      step.continueOnError = unquote(value) !== 'false';
     }
   }
   return step;
 }
 
-/** Commands a run string executes: { pnpm: scriptName } or { file: path run by node/tsx }. */
+/** `cmd && cmd && ...` split into commands, or null if the line uses any other shell operator (quote-aware). */
+function simpleChain(line) {
+  const parts = [];
+  let cur = '';
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) { cur += c; if (c === quote) quote = null; continue; }
+    if (c === '"' || c === "'") { quote = c; cur += c; continue; }
+    if (c === '&' && line[i + 1] === '&') { parts.push(cur.trim()); cur = ''; i++; continue; }
+    if (c === '|' || c === '&' || c === ';' || c === '`') return null;
+    cur += c;
+  }
+  if (quote) return null;
+  parts.push(cur.trim());
+  return parts.every(Boolean) ? parts : null;
+}
+// Control flow, grouping, negation and `set` (which can turn off fail-fast) make "this line ran" unprovable.
+const CONTROL = /^(?:if|then|else|elif|fi|for|while|until|case|esac|do|done|function|select|set|trap|exit|return)\b|^[!{}()]/;
+
+/**
+ * Commands a run string is guaranteed to execute when its step succeeds: { pnpm: scriptName } or
+ * { file: path run by node/tsx }. Only plain lines of `cmd && cmd` count (Actions runs bash -e, so each
+ * one runs or the step fails). A run using ||, pipes, background jobs, `;` or control flow counts nothing.
+ */
 export function invocations(run) {
+  const lines = run.split('\n').map((l) => l.trim()).filter(Boolean);
+  const chains = lines.map(simpleChain);
+  if (chains.some((c) => c === null)) return [];
+  const cmds = chains.flat();
+  if (cmds.some((c) => CONTROL.test(c))) return [];
   const out = [];
-  for (const cmd of run.split(/\n|&&|\|\||;/)) {
-    const t = cmd.trim().split(/\s+/).filter(Boolean);
+  for (const cmd of cmds) {
+    const t = cmd.split(/\s+/);
     let k = 1;
     const skipFlags = () => { while (t[k]?.startsWith('-')) k++; };
     skipFlags();
@@ -78,6 +111,9 @@ export function invocations(run) {
   }
   return out;
 }
+
+/** Whether a step always runs and its failure fails the job (no `if:` condition, no continue-on-error). */
+export const enforcing = (step) => !step.conditional && !step.continueOnError;
 
 /** [fileName, steps] for each workflow under root/.github/workflows. */
 export function readWorkflows(root) {
