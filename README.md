@@ -30,9 +30,11 @@ All read tools are annotated `readOnlyHint: true`; `issue_refund` is `destructiv
 | `get_invoice` | One invoice by id | |
 | `search_orders` | Text search on order number or customer name | parameterized, wildcards matched literally, max 50 |
 | `list_pending_approvals` | Write requests waiting for a human | max 50 |
-| `issue_refund` | Requests a refund on an invoice. Returns `pending_approval` with an `approvalId`; nothing is refunded until a human approves it | `idempotency_key` required; reuse it on retry. Needs `MCP_ROLE=operator` |
+| `issue_refund` | Requests a refund on an invoice. Returns `pending_approval` with an `approvalId`; nothing is refunded until a human approves it | `idempotency_key` required; reuse it on retry. Needs `MCP_ROLE=operator` on stdio, or the `refund:request` scope over HTTP |
 
 `pnpm start` needs `DATABASE_URL` and refuses to start without it. Every connection runs as `meridian_app`; if `SET ROLE meridian_app` fails or `current_user` is anything else, the server exits 1. `MCP_ACTOR` (default `local-dev`) and `MCP_ROLE` (`reader` or `operator`) set the audit identity.
+
+The exact `tools/list` result is pinned in `test/snapshots/tools-list.json`, and `pnpm test` fails on any change to it. After an intended tool change, run `pnpm tools:snapshot` and commit the reviewed diff.
 
 ## HTTP transport (local and demo use)
 
@@ -42,10 +44,10 @@ pnpm mint-token alice refund:request     # prints the raw token once, and its sh
 MCP_TRANSPORT=http MCP_HTTP_TOKENS_FILE=tokens.conf DATABASE_URL=… pnpm start
 ```
 
-- Serves `POST /mcp` with the SDK's Streamable HTTP transport. In v0.1.0 HTTP mode is stateless and speaks only the 2025-era protocol: there are no sessions and no streaming (`GET`/`DELETE` get `405`, which is not audited because the SDK client probes `GET` on every connection), and 2026-07-28 clients fall back to the older initialize handshake. Binds `127.0.0.1:3333` by default (`MCP_HTTP_HOST`, `MCP_HTTP_PORT`).
+- Serves `POST /mcp` with the SDK's Streamable HTTP transport. In v0.1.0 HTTP mode is stateless and speaks only the 2025-era protocol: there are no sessions and no streaming (`GET`/`DELETE` get `405`, which is not audited because the SDK client probes `GET` on every connection), and 2026-07-28 clients fall back to the older initialize handshake. Support for the 2026-07-28 protocol, sessions and streaming is tracked in [#25](https://github.com/aadil96/guarded-mcp-server/issues/25). Binds `127.0.0.1:3333` by default (`MCP_HTTP_HOST`, `MCP_HTTP_PORT`).
 - Clients send `Authorization: Bearer <token>`. The config (`MCP_HTTP_TOKENS_FILE`, or the same lines inline in `MCP_HTTP_TOKENS`) holds only SHA-256 hashes, one `sha256:<hex> <actor> <scopes>` per line. Tokens are compared in constant time. The server refuses to start with no tokens or any malformed line.
 - Scopes: `read` gives the reader role; `refund:request` (which includes `read`) gives the operator role. No scope gives `admin`: approving and executing stay in the approvals console. The audit actor and role come from the token, never from tool arguments.
-- Every token sees the same `tools/list` as stdio. A `tools/call` outside the token's scopes is refused with `insufficient_scope` and audited once. The SDK validates arguments before the scope check, so an out-of-scope call with invalid arguments is refused and audited once as `invalid_args` instead. Tool schemas are public through `tools/list` anyway.
+- Every token sees the same `tools/list` as stdio. A `tools/call` outside the token's scopes is refused with `insufficient_scope` and audited once. The SDK validates arguments before the scope check, so an out-of-scope call with invalid arguments is refused and audited once as `invalid_args` instead. Tool schemas are public through `tools/list` anyway. Checking scope first is tracked in [#26](https://github.com/aadil96/guarded-mcp-server/issues/26).
 - Before any tool runs, requests are refused with `401` (missing or bad token, with a `WWW-Authenticate: Bearer` challenge), `403` (a `Host` or browser `Origin` outside the localhost allowlist, against DNS rebinding; extend with `MCP_HTTP_ALLOWED_HOSTS` / `MCP_HTTP_ALLOWED_ORIGINS`) or `413` (body over 1 MiB). No CORS headers are sent.
 - These refusals are written to `audit_events` (actor `anonymous`, no header values). Each row records the client IP, its status and the HTTP method. The server binds localhost by default, and the audit table holds no customer data.
 - Each IP gets a burst of 10 refusal rows, refilled at 10 a minute. Beyond that the request is still refused but not audited, and the dropped count goes into one `rejections_dropped` row a minute. Over the limit the response stays `401` on purpose: a `429` would reveal the limit.
@@ -60,6 +62,8 @@ Static bearer tokens are for local and demo use. A real multi-user deployment sh
 - No full OAuth 2.1 in v1. The upgrade path is documented instead.
 
 ## Local dev
+
+Node: any version in `engines.node` (`>=22.12.0 <23`) works locally, and CI runs exactly the version in `.nvmrc` (`nvm use` picks it up). `pnpm check:engines` checks your Node against the range, and CI adds `--exact`.
 
 ```sh
 pnpm install
