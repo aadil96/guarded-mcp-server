@@ -317,6 +317,65 @@ describe('audit atomicity (Codex P1/P2)', () => {
   });
 });
 
+describe('execute audit atomicity', () => {
+  const approvalRow = async (id: string) => (await ctx.client.query<{ status: string; result: unknown; executed_at: Date | null }>(
+    'select status, result, executed_at from approvals where id = $1', [id])).rows[0];
+
+  it('executeApproval (success): forced audit failure rolls back the refund, the status claim and the result', async () => {
+    const inv = await invoice('part_paid');
+    const id = await approved('atom-exec-ok', refundArgs(inv.id, 100));
+    const audits = await n('audit_events');
+    await expect(executeApproval(auditFailing(db), id, admin)).rejects.toThrow('forced audit failure');
+    expect(await approvalRow(id)).toEqual({ status: 'approved', result: null, executed_at: null });
+    expect(await refundsFor(inv.id)).toBe(0);
+    expect(await n('audit_events')).toBe(audits);
+    // Nothing was lost: the approval can still be executed once the audit write works.
+    expect((await executeApproval(db, id, admin)).kind).toBe('executed');
+    expect(await refundsFor(inv.id)).toBe(1);
+  });
+
+  it('executeApproval (failed outcome): forced audit failure rolls back the failed claim', async () => {
+    const inv = await invoice('part_paid');
+    const id = await approved('atom-exec-fail', refundArgs(inv.id, inv.paid + 1));
+    const audits = await n('audit_events');
+    await expect(executeApproval(auditFailing(db), id, admin)).rejects.toThrow('forced audit failure');
+    expect(await approvalRow(id)).toEqual({ status: 'approved', result: null, executed_at: null });
+    expect(await n('audit_events')).toBe(audits);
+  });
+});
+
+describe('every approvals path writes exactly one audit row', () => {
+  it('create, repeat, resolve, execute, replay and each rejection add +1 audit row', async () => {
+    const inv = await invoice('part_paid');
+    const args = refundArgs(inv.id, 100);
+    let approvalId = '';
+    const steps: [string, () => Promise<unknown>][] = [
+      ['create', async () => { const r = await requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 'one-row' }); if (r.kind !== 'pending') throw new Error(r.kind); approvalId = r.approvalId; }],
+      ['repeat while pending', () => requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 'one-row' })],
+      ['key reused with other args', () => requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 101), idempotencyKey: 'one-row' })],
+      ['resolve', () => resolveApproval(db, { ...admin, approvalId, decision: 'approve' })],
+      ['resolve again (not pending)', () => resolveApproval(db, { ...admin, approvalId, decision: 'approve' })],
+      ['execute', () => executeApproval(db, approvalId, admin)],
+      ['execute again (duplicate)', () => executeApproval(db, approvalId, admin)],
+      ['request replay after execution', () => requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 'one-row' })],
+      ['reader request denied', () => requestWrite(db, { ...reader, tool: 'issue_refund', args, idempotencyKey: 'one-row-r' })],
+      ['invalid args', () => requestWrite(db, { ...op, tool: 'issue_refund', args: { invoice_id: inv.id }, idempotencyKey: 'one-row-bad' })],
+      ['invalid caller', () => requestWrite(db, { actor: '', role: 'operator', tool: 'issue_refund', args, idempotencyKey: 'one-row-c' })],
+      ['resolve not found', () => resolveApproval(db, { ...admin, approvalId: '00000000-0000-4000-8000-000000000000', decision: 'approve' })],
+      ['resolve by non-admin', () => resolveApproval(db, { ...op, approvalId, decision: 'deny' })],
+      ['execute by reader', () => executeApproval(db, approvalId, reader)],
+      ['execute malformed id', () => executeApproval(db, 'nope', admin)],
+    ];
+    for (const [label, step] of steps) {
+      const before = await n('audit_events');
+      await step();
+      expect(await n('audit_events'), label).toBe(before + 1);
+    }
+    expect(await n(`approvals where idempotency_key like 'one-row%'`)).toBe(1);
+    expect(await refundsFor(inv.id)).toBe(1);
+  });
+});
+
 describe('malformed approval ids (Codex P2)', () => {
   for (const bad of ['not-a-uuid', '', "1' or '1'='1", '00000000-0000-0000-0000-00000000000g']) {
     it(`resolve + execute reject ${JSON.stringify(bad)} as invalid_args with an audit row`, async () => {

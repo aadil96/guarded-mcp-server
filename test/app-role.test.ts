@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { callerFromEnv } from '../src/audit/log.js';
-import { closeAppDb, connectAsApp } from '../src/db/index.js';
+import { closeAppDb, connectAsApp, queryRows } from '../src/db/index.js';
 import { seed, seedId } from '../src/db/seed.js';
 import type { AppDb } from '../src/db/types.js';
-import { callTool } from '../src/server.js';
+import { callTool, createServer } from '../src/server.js';
+import { AuditTracker, auditingTransport } from '../src/audit/transport.js';
+import { InMemoryTransport, type JSONRPCMessage } from '@modelcontextprotocol/server';
 import type { readTools } from '../src/tools/read.js';
 import { freshDb, startServer } from './helpers.js';
 
@@ -51,6 +53,37 @@ describe('server db connection runs as meridian_app', () => {
     }
     const n = await run('select count(*)::int as n from audit_events');
     expect((n as unknown as { rows: { n: number }[] }).rows[0].n).toBe(calls.length);
+  });
+
+  it('the transport hook audits an SDK-rejected call under the app role, even with a NUL in the tool name', async () => {
+    const caller = callerFromEnv({});
+    const count = async () => (await queryRows<{ n: number }>(db, sql`select count(*)::int n from audit_events`))[0].n;
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    const tracker = new AuditTracker();
+    await createServer(db, caller, tracker).connect(auditingTransport(serverT, db, caller, tracker));
+    const pending = new Map<number, (m: JSONRPCMessage) => void>();
+    clientT.onmessage = (m) => { if ('id' in m && typeof m.id === 'number') pending.get(m.id)?.(m); };
+    await clientT.start();
+    let id = 0;
+    const rpc = (method: string, params: unknown) => new Promise<{ result?: Record<string, unknown>; error?: unknown }>((res) => {
+      const k = ++id;
+      pending.set(k, res as (m: JSONRPCMessage) => void);
+      void clientT.send({ jsonrpc: '2.0', id: k, method, params } as JSONRPCMessage);
+    });
+    await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
+    await clientT.send({ jsonrpc: '2.0', method: 'notifications/initialized' } as JSONRPCMessage);
+    const before = await count();
+    const bad = await rpc('tools/call', { name: 'get_invoice', arguments: { invoice_id: 'nope', password: 'hunter2' } });
+    expect(bad.result?.isError).toBe(true);
+    expect(await count()).toBe(before + 1);
+    const odd = await rpc('tools/call', { name: 'get\u0000order\uD800', arguments: {} });
+    expect(odd.result?.isError === true || odd.error !== undefined).toBe(true);
+    expect(await count()).toBe(before + 2);
+    const rows = await queryRows<{ tool: string; outcome: string; error_code: string; role: string }>(db,
+      sql`select tool, outcome::text, error_code, role::text from audit_events order by created_at desc, ctid desc limit 2`);
+    expect(new Set(rows.map((r) => r.tool))).toEqual(new Set(['get_invoice', 'get\uFFFDorder\uFFFD']));
+    expect(rows.every((r) => r.outcome === 'error' && r.error_code === 'invalid_args' && r.role === 'reader')).toBe(true);
+    await clientT.close();
   });
 
   it('cannot UPDATE or DELETE audit_events', async () => {

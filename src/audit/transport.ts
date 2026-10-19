@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { JSONRPCMessage, Transport } from '@modelcontextprotocol/server';
 import type { AppDb } from '../db/types.js';
+import { inAppTx } from '../db/index.js';
 import { type Caller, writeAudit } from './log.js';
 
 type Id = string | number;
@@ -45,10 +46,12 @@ export function auditingTransport(
         const handled = tracker.handled.delete(id);
         if (!handled && isRejection(message)) {
           try {
-            await writeAudit(db, caller, {
-              tool: typeof p.tool === 'string' ? p.tool : '(missing)', arguments: p.args, outcome: 'error',
-              durationMs: performance.now() - p.started, correlationId: randomUUID(), errorCode: 'invalid_args',
-            });
+            await inAppTx(db, (tx) => writeAudit(tx, {
+              actor: caller.actor, role: caller.role,
+              tool: typeof p.tool === 'string' ? p.tool : '(missing)',
+              args: p.args, outcome: 'error',
+              startedAt: p.started, correlationId: randomUUID(), errorCode: 'invalid_args',
+            }));
           } catch (e) {
             console.error('audit write failed for rejected tools/call:', e);
           }

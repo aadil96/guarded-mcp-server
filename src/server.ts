@@ -5,6 +5,7 @@ import { type Caller, callerFromEnv, writeAudit } from './audit/log.js';
 import { AuditTracker } from './audit/transport.js';
 import type { AppDb } from './db/types.js';
 import { readTools, ToolError } from './tools/read.js';
+import { inAppTx } from './db/index.js';
 
 type Result = { content: { type: 'text'; text: string }[]; isError?: boolean };
 
@@ -25,10 +26,10 @@ export async function callTool(db: AppDb, caller: Caller, name: keyof typeof rea
     if (errorCode === 'internal_error') console.error(`[${correlationId}]`, e);
     result = { content: [{ type: 'text', text: JSON.stringify({ error: errorCode, message: msg, correlationId }) }], isError: true };
   }
-  await writeAudit(db, caller, {
-    tool: name, arguments: args, outcome: errorCode ? 'error' : 'ok',
-    durationMs: performance.now() - started, correlationId, errorCode,
-  });
+  await inAppTx(db, (tx) => writeAudit(tx, {
+    actor: caller.actor, role: caller.role, tool: name, args,
+    outcome: errorCode ? 'error' : 'ok', startedAt: started, correlationId, errorCode,
+  }));
   return result;
 }
 

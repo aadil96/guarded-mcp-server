@@ -2,11 +2,8 @@ import type { AppQueryable, AppTx } from '../db/types.js';
 import type { z } from 'zod';
 
 export type WriteTool = 'issue_refund' | 'update_order_status' | 'create_credit_note' | 'add_customer_note';
-export type Role = 'reader' | 'operator' | 'admin';
-/** Role as recorded in audit_events: a real role, or the placeholder for invalid caller metadata. */
-export type AuditRole = Role | 'invalid';
+export type { AuditOutcome, AuditRole, Role } from '../audit/log.js';
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'executed' | 'failed';
-export type AuditOutcome = 'ok' | 'error' | 'denied' | 'pending_approval' | 'duplicate' | 'conflict';
 
 export type Approval = {
   id: string;
@@ -20,8 +17,6 @@ export type Approval = {
   resolved_by: string | null;
   result: unknown;
 };
-
-export type Caller = { actor: string; role: Role; correlationId?: string };
 
 export type RequestWriteResult =
   | { kind: 'pending'; approvalId: string; summary: string; approval: Approval }
