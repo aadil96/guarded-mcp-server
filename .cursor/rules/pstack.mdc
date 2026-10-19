@@ -3,7 +3,9 @@ description: Work in pstack style on every task in this repo.
 alwaysApply: true
 ---
 
-Use pstack, vendored in `.cursor/skills/`. Its skills don't load on their own, so read each `SKILL.md` yourself when its step comes up.
+Use pstack, vendored in `.cursor/skills/`. Its skills don't load on their own, so read each `SKILL.md` yourself when its step comes up. Its subagents (`poteto-agent`, `comment-sicko`) are in `.cursor/agents/`.
+
+Repo rules override pstack: never force-push (including `--force-with-lease`) and never push to `main`. If a playbook step needs one of those, stop and report instead.
 
 1. Read `.cursor/skills/poteto-mode/SKILL.md` before anything else and follow it.
 2. Work in pstack's order: types and invariants first, then lint, tests and CI, then minimal prose.
