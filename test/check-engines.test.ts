@@ -42,6 +42,12 @@ describe('check-engines', () => {
     }
   });
 
+  it('accepts quoted values and a second, correctly configured setup-node step', () => {
+    const two = `${CI("          node-version-file: '.nvmrc'")}  other:\n    steps:\n      - name: node\n        uses: actions/setup-node@v4\n        with:\n          node-version-file: ".nvmrc" # pinned\n`;
+    const r = check({ ci: two }, ['--runtime', '22.20.0']);
+    expect(r.code, r.out).toBe(0);
+  });
+
   it('locally a compatible runtime is enough; --exact (CI) requires the pinned version', () => {
     expect(check({}, ['--runtime', '22.20.0']).code).toBe(0);
     const exact = check({}, ['--runtime', '22.20.0', '--exact']);
@@ -60,6 +66,8 @@ describe('check-engines', () => {
     ['engines.node missing', { engines: '' }, ['--runtime', '22.23.3'], /engines\.node must be a range of the form/],
     ['CI hard-codes node-version', { ci: CI('          node-version: 22') }, ['--runtime', '22.20.0'], /ci\.yml: setup-node must use node-version-file: \.nvmrc/],
     ['CI hard-codes it next to the file', { ci: CI('          node-version-file: .nvmrc\n          node-version: 22.23.3') }, ['--runtime', '22.20.0'], /ci\.yml: setup-node must use node-version-file: \.nvmrc/],
+    ['.nvmrc only in another step', { ci: 'jobs:\n  test:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          cache: pnpm\n      - run: echo hi\n        env:\n          node-version-file: .nvmrc\n' }, ['--runtime', '22.20.0'], /ci\.yml: setup-node must use node-version-file: \.nvmrc/],
+    ['the .nvmrc line commented out', { ci: CI('          # node-version-file: .nvmrc') }, ['--runtime', '22.20.0'], /ci\.yml: setup-node must use node-version-file: \.nvmrc/],
   ])('fails on %s', (_name, over, args, msg) => {
     const r = check(over, args);
     expect(r.code, r.out).toBe(1);

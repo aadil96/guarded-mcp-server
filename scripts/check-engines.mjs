@@ -5,8 +5,9 @@
 //  - .nvmrc must sit inside that range, and the running Node must satisfy it.
 //  - With --exact (CI), the running Node must be exactly the .nvmrc version.
 // Usage: node scripts/check-engines.mjs [repoRoot] [--exact] [--runtime <version>]  (--runtime is for tests)
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { readWorkflows } from './lib/workflow.mjs';
 
 const argv = process.argv.slice(2);
 const exact = argv.includes('--exact');
@@ -30,14 +31,10 @@ const pinned = parse(nvmrc);
 if (!pinned) errors.push(`.nvmrc must be an exact version like 22.23.3, got "${nvmrc}"`);
 else if (range && !satisfies(pinned)) errors.push(`.nvmrc ${nvmrc} does not satisfy engines.node ${engine}`);
 
-const wfDir = join(root, '.github/workflows');
-for (const f of existsSync(wfDir) ? readdirSync(wfDir).filter((n) => /\.ya?ml$/.test(n)) : []) {
-  const text = readFileSync(join(wfDir, f), 'utf8');
-  const setups = (text.match(/uses:\s*actions\/setup-node@/g) ?? []).length;
-  const fromFile = (text.match(/^\s*node-version-file:\s*['"]?\.nvmrc['"]?\s*$/gm) ?? []).length;
-  if (setups && (fromFile !== setups || /^\s*node-version:/m.test(text))) {
-    errors.push(`${f}: setup-node must use node-version-file: .nvmrc, with no node-version`);
-  }
+for (const [f, steps] of readWorkflows(root)) {
+  // Each setup-node step must read .nvmrc itself, with no hard-coded version beside it.
+  const bad = steps.some((st) => /^actions\/setup-node@/.test(st.uses ?? '') && (st.with['node-version-file'] !== '.nvmrc' || 'node-version' in st.with));
+  if (bad) errors.push(`${f}: setup-node must use node-version-file: .nvmrc, with no node-version`);
 }
 
 const rt = parse(runtime ?? '');

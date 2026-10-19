@@ -62,6 +62,27 @@ describe('check-agents-md-enforcers', () => {
     expect(r.out).toMatch(msg);
   });
 
+  it.each([
+    ['commented out', 'steps:\n  # - run: pnpm check:x\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['only echoed', 'steps:\n  - run: echo scripts/check-x.mjs && echo pnpm check:x-later\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['only in a step name', 'steps:\n  - name: pnpm check:x\n    run: pnpm typecheck\n  - run: pnpm test\n'],
+    ['only in an env value', 'steps:\n  - run: pnpm typecheck\n    env:\n      X: pnpm check:x\n  - run: pnpm test\n'],
+    ['after a trailing comment', 'steps:\n  - run: pnpm typecheck # pnpm check:x\n  - run: pnpm test\n'],
+  ])('a script CI does not execute (%s) does not count', (_name, ci) => {
+    const r = check(`${HEAD}| A | \`scripts/check-x.mjs\` |\n`, { '.github/workflows/ci.yml': ci });
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toMatch(/A: scripts\/check-x\.mjs is not run by CI/);
+  });
+
+  it.each([
+    ['a block run', 'steps:\n  - name: checks\n    run: |\n      pnpm typecheck\n      pnpm check:x --strict\n  - run: pnpm test\n'],
+    ['node on the path', 'steps:\n  - run: node scripts/check-x.mjs\n  - run: pnpm typecheck && pnpm test\n'],
+    ['pnpm run', 'steps:\n  - run: pnpm run check:x\n  - run: pnpm typecheck\n  - run: pnpm test\n'],
+  ])('a script CI executes via %s counts', (_name, ci) => {
+    const r = check(`${HEAD}| A | \`scripts/check-x.mjs\` |\n`, { '.github/workflows/ci.yml': ci });
+    expect(r.code, r.out).toBe(0);
+  });
+
   it('fails when the separator is missing or malformed, instead of silently dropping the first row', () => {
     const noSep = check('# Agents\n\n## Rules and enforcers\n\n| Rule | Enforced by |\n| A | `test/gone.test.ts` |\n| B | `test/thing.test.ts` |\n');
     expect(noSep.code, noSep.out).toBe(1);
