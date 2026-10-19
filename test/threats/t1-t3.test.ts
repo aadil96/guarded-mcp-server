@@ -158,8 +158,11 @@ describe('T3 resolver binding', () => {
     expect(on.config.singleOperator).toBe(true);
     expect(await on.resolveApproval(db, { ...me, approvalId: r.approvalId, decision: 'approve' })).toMatchObject({ kind: 'resolved', status: 'approved' });
   });
-  it('startup refuses APPROVALS_SINGLE_OPERATOR=true in production', () => {
-    expect(() => loadApprovalsConfig({ APPROVALS_SINGLE_OPERATOR: 'true', NODE_ENV: 'production' })).toThrow(/not allowed when NODE_ENV=production/);
+  it('startup refuses APPROVALS_SINGLE_OPERATOR=true unless NODE_ENV is exactly development', () => {
+    for (const NODE_ENV of ['production', undefined, '', 'test', 'staging', 'Development', 'develop']) {
+      expect(() => loadApprovalsConfig({ APPROVALS_SINGLE_OPERATOR: 'true', NODE_ENV })).toThrow(/only allowed when NODE_ENV=development/);
+    }
+    expect(loadApprovalsConfig({ APPROVALS_SINGLE_OPERATOR: 'true', NODE_ENV: 'development' })).toEqual({ singleOperator: true });
     expect(() => loadApprovalsConfig({ APPROVALS_SINGLE_OPERATOR: 'yes' })).toThrow();
     expect(loadApprovalsConfig({ NODE_ENV: 'production' })).toEqual({ singleOperator: false });
     expect(loadApprovalsConfig({})).toEqual({ singleOperator: false });
@@ -462,5 +465,15 @@ describe('runtime input hardening (Codex re-review)', () => {
     expect(r.kind).toBe('invalid_args');
     expect(await n('audit_events')).toBe(auditBefore + 1);
     expect(await lastAudit()).toMatchObject({ outcome: 'error', error_code: 'invalid_args' });
+  });
+
+  it('an own __proto__ key in rejected arguments is kept in the audit row', async () => {
+    const inv = await sharedInv();
+    const args = JSON.parse(`{"invoice_id":"${inv.id}","amount_paise":100,"reason":"x","__proto__":{"hidden":"payload"}}`);
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args, idempotencyKey: 'own-proto' });
+    expect(r.kind).toBe('invalid_args');
+    const a = await ctx.client.query<{ arguments: Record<string, unknown> }>(`select arguments from audit_events where idempotency_key = 'own-proto'`);
+    expect(Object.hasOwn(a.rows[0].arguments, '__proto__')).toBe(true);
+    expect(JSON.stringify(a.rows[0].arguments)).toContain('"hidden":"payload"');
   });
 });

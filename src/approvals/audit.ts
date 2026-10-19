@@ -32,7 +32,8 @@ function walk(value: unknown, depth: number, w: Walk): unknown {
   w.path.add(value);
   try {
     if (Array.isArray(value)) return value.slice(0, MAX_KEYS).map((v) => walk(v, depth + 1, w));
-    const out: Record<string, unknown> = {};
+    // Null prototype: an own '__proto__' key becomes a plain field instead of hitting the legacy setter.
+    const out: Record<string, unknown> = Object.create(null);
     for (const k of Object.keys(value).slice(0, MAX_KEYS)) {
       if (w.budget <= 0) { out['…'] = '[truncated]'; break; }
       let v: unknown;
