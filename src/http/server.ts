@@ -84,8 +84,9 @@ export function startHttpServer(opts: HttpOptions) {
   async function handle(req: IncomingMessage, res: ServerResponse) {
     const ip = req.socket.remoteAddress ?? 'unknown';
     const method = req.method ?? 'GET';
-    const url = new URL(req.url ?? '/', 'http://localhost');
-    if (url.pathname !== MCP_PATH) return sendJson(res, 404, { error: 'not_found' });
+    // Only the origin-form target /mcp (optionally with a query) is served; anything else, including absolute-form
+    // or unparseable targets, is a 404 decided without URL parsing, so no target can throw before the guards.
+    if ((req.url ?? '').split('?')[0] !== MCP_PATH) return sendJson(res, 404, { error: 'not_found' });
     const declared = Number(req.headers['content-length'] ?? 0);
     if (declared > maxBody) {
       res.setHeader('connection', 'close');

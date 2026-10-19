@@ -181,6 +181,20 @@ describe('HTTP transport: request guards', () => {
     }
   });
 
+  it('answers a malformed or absolute-form request target with 404, not a 500', async () => {
+    const { connect: tcp } = await import('node:net');
+    for (const target of ['http://[:::]/mcp', 'http://localhost/mcp', '*']) {
+      const sock = tcp(Number(srv.url.port), srv.url.hostname);
+      let raw = '';
+      sock.on('data', (d) => { raw += d.toString('latin1'); });
+      const ended = new Promise<void>((r) => { sock.once('close', () => r()); });
+      sock.write(`POST ${target} HTTP/1.1\r\nHost: attacker.example\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}`);
+      await ended;
+      expect(raw.slice(0, 12), target).toBe('HTTP/1.1 404');
+    }
+    expect(logs.filter((l) => l.includes('http request failed'))).toEqual([]);
+  });
+
   it('caps the body at 1 MiB with 413, declared or streamed, before parsing', async () => {
     const big = 'x'.repeat(1024 * 1024 + 1);
     const declared = await post({ authorization: `Bearer ${operator.token}` }, big);
