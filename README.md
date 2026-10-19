@@ -42,12 +42,13 @@ pnpm mint-token alice refund:request     # prints the raw token once, and its sh
 MCP_TRANSPORT=http MCP_HTTP_TOKENS_FILE=tokens.conf DATABASE_URL=… pnpm start
 ```
 
-- Serves `POST /mcp` with the SDK's Streamable HTTP transport, stateless (no sessions, so `GET`/`DELETE` are `405`). Binds `127.0.0.1:3333` by default (`MCP_HTTP_HOST`, `MCP_HTTP_PORT`).
+- Serves `POST /mcp` with the SDK's Streamable HTTP transport. In v0.1.0 HTTP mode is stateless and speaks only the 2025-era protocol: there are no sessions and no streaming (`GET`/`DELETE` are `405`), and 2026-07-28 clients fall back to the older initialize handshake. Binds `127.0.0.1:3333` by default (`MCP_HTTP_HOST`, `MCP_HTTP_PORT`).
 - Clients send `Authorization: Bearer <token>`. The config (`MCP_HTTP_TOKENS_FILE`, or the same lines inline in `MCP_HTTP_TOKENS`) holds only SHA-256 hashes, one `sha256:<hex> <actor> <scopes>` per line. Tokens are compared in constant time. The server refuses to start with no tokens or any malformed line.
 - Scopes: `read` gives the reader role; `refund:request` (which includes `read`) gives the operator role. No scope gives `admin`: approving and executing stay in the approvals console. The audit actor and role come from the token, never from tool arguments.
-- Every token sees the same `tools/list` as stdio. A `tools/call` outside the token's scopes is refused with `insufficient_scope` and audited once.
+- Every token sees the same `tools/list` as stdio. A `tools/call` outside the token's scopes is refused with `insufficient_scope` and audited once. The SDK validates arguments before the scope check, so an out-of-scope call with invalid arguments is refused and audited once as `invalid_args` instead. Tool schemas are public through `tools/list` anyway.
 - Before any tool runs, requests are refused with `401` (missing or bad token, with a `WWW-Authenticate: Bearer` challenge), `403` (a `Host` or browser `Origin` outside the localhost allowlist, against DNS rebinding; extend with `MCP_HTTP_ALLOWED_HOSTS` / `MCP_HTTP_ALLOWED_ORIGINS`) or `413` (body over 1 MiB). No CORS headers are sent.
-- These refusals are written to `audit_events` (actor `anonymous`, no header values). Each IP gets a burst of 10 rows refilled at 10 a minute; beyond that the request is still refused but not audited, and the dropped count goes into one `rejections_dropped` row a minute.
+- These refusals are written to `audit_events` (actor `anonymous`, no header values). Each row records the client IP, its status and the HTTP method. The server binds localhost by default, and the audit table holds no customer data.
+- Each IP gets a burst of 10 refusal rows, refilled at 10 a minute. Beyond that the request is still refused but not audited, and the dropped count goes into one `rejections_dropped` row a minute. Over the limit the response stays `401` on purpose: a `429` would reveal the limit.
 
 Static bearer tokens are for local and demo use. A real multi-user deployment should use the MCP specification's OAuth 2.1 authorization (an authorization server, audience-bound short-lived tokens, protected resource metadata), which this project does not implement.
 
