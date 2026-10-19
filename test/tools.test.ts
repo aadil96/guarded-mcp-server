@@ -131,7 +131,7 @@ describe('audit', () => {
 });
 
 describe('MCP server over in-memory transport', () => {
-  it('lists exactly the 8 read tools and serves get_order', async () => {
+  it('lists exactly the 8 read tools plus issue_refund and serves get_order', async () => {
     const [clientT, serverT] = InMemoryTransport.createLinkedPair();
     const tracker = new AuditTracker();
     const db = ctx.db as unknown as AppDb; // owner handle stands in: these tests cover tool behaviour, not grants
@@ -150,9 +150,9 @@ describe('MCP server over in-memory transport', () => {
     const list = await rpc('tools/list', {});
     const tools = list.result?.tools as { name: string; annotations: { readOnlyHint: boolean } }[];
     expect(tools.map((t) => t.name).sort()).toEqual([
-      'get_customer', 'get_invoice', 'get_order', 'list_customers', 'list_invoices', 'list_orders', 'list_pending_approvals', 'search_orders',
+      'get_customer', 'get_invoice', 'get_order', 'issue_refund', 'list_customers', 'list_invoices', 'list_orders', 'list_pending_approvals', 'search_orders',
     ]);
-    expect(tools.every((t) => t.annotations.readOnlyHint === true)).toBe(true);
+    expect(tools.filter((t) => t.annotations.readOnlyHint !== true).map((t) => t.name)).toEqual(['issue_refund']);
     const r = await rpc('tools/call', { name: 'get_order', arguments: { order_id: seedId('order:1') } });
     const content = r.result?.content as { text: string }[];
     expect(JSON.parse(content[0].text).orderNumber).toBe('ORD-0001');

@@ -4,11 +4,10 @@ import { seed, seedId } from '../src/db/seed.js';
 import type { AppDb } from '../src/db/types.js';
 import { serverTools } from '../src/server.js';
 import type { DefinedTool } from '../src/tools/framework.js';
-import { refundTool } from './fixtures/write-tools.js';
 import { auditFailing, freshDb, mcpClient } from './helpers.js';
 
-// Every registered tool, plus the write tool the MCP wiring will add. A tool without samples fails the test.
-const tools: readonly DefinedTool[] = [...serverTools, refundTool];
+// Every registered tool. A tool without samples fails the test.
+const tools: readonly DefinedTool[] = serverTools;
 const missing = '00000000-0000-4000-8000-000000000000';
 
 type Samples = { ok: Record<string, unknown>; bad: Record<string, unknown>; extra: Record<string, unknown>; notFound?: Record<string, unknown> };

@@ -9,7 +9,7 @@ import type { AppDb } from '../src/db/types.js';
 import { createServer, serverTools } from '../src/server.js';
 import { approvalHandlers, assertStrict, defineReadTool, defineWriteTool, mapRequestWriteResult } from '../src/tools/framework.js';
 import { issueRefund, issueRefundSchema } from '../src/approvals/refund.js';
-import { refundTool } from './fixtures/write-tools.js';
+import { issueRefundTool } from '../src/tools/write.js';
 import { freshDb, mcpClient } from './helpers.js';
 
 const parse = (r: { content: { type: string; text?: string }[]; isError?: boolean }) =>
@@ -34,7 +34,7 @@ describe('strictness is enforced when a tool is defined', () => {
   });
   it('accepts strict schemas, and every registered tool is strict', () => {
     expect(() => assertStrict(z.strictObject({ n: z.strictObject({ a: z.string() }).optional() }))).not.toThrow();
-    for (const t of [...serverTools, refundTool]) expect(() => assertStrict(t.inputSchema, t.name)).not.toThrow();
+    for (const t of serverTools) expect(() => assertStrict(t.inputSchema, t.name)).not.toThrow();
   });
 });
 
@@ -63,7 +63,7 @@ describe('registration only through the framework', () => {
   it('createServer refuses a tool not built by defineReadTool/defineWriteTool, and duplicate names', () => {
     const forged = { name: 'forged', kind: 'read', description: 'x', inputSchema: z.strictObject({}), annotations: {}, call: async () => ({ content: [] }) };
     expect(() => createServer({} as AppDb, { actor: 'a', role: 'reader' }, undefined, [forged as never])).toThrow(/defineReadTool or defineWriteTool/);
-    expect(() => createServer({} as AppDb, { actor: 'a', role: 'reader' }, undefined, [refundTool, refundTool])).toThrow(/duplicate tool name issue_refund/);
+    expect(() => createServer({} as AppDb, { actor: 'a', role: 'reader' }, undefined, [issueRefundTool, issueRefundTool])).toThrow(/duplicate tool name issue_refund/);
   });
 });
 
@@ -103,7 +103,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
     invoiceId = (await ctx.client.query<{ id: string }>(`select id from invoices where status = 'paid' order by invoice_number limit 1`)).rows[0].id;
     if (ctx.url) db = await connectAsApp(ctx.url);
     else { await ctx.client.query('set role meridian_app'); db = ctx.db as unknown as AppDb; }
-    cli = await mcpClient(db, op, [...serverTools, refundTool]);
+    cli = await mcpClient(db, op, serverTools);
   });
   afterAll(async () => { await cli.close(); await closeAppDb(db); await ctx.client.close(); });
 
@@ -143,7 +143,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
     const { data } = await cli.call('issue_refund', args(100, 'mcp-1'));
     const id = data.approvalId as string;
     expect((await resolveApproval(db, { ...admin, approvalId: id, decision: 'approve' })).kind).toBe('resolved');
-    const ex = await executeApproval(db, id, admin, approvalHandlers([refundTool]));
+    const ex = await executeApproval(db, id, admin, approvalHandlers([issueRefundTool]));
     if (ex.kind !== 'executed') throw new Error(ex.kind);
     const r = await step(() => cli.call('issue_refund', args(100, 'mcp-1')));
     expect(r).toEqual({ isError: false, data: { status: 'duplicate', approvalId: id, approvalStatus: 'executed', result: ex.result }, raw: expect.anything() });
@@ -153,7 +153,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
     const { data } = await cli.call('issue_refund', args(999_999_999, 'mcp-fail'));
     const id = data.approvalId as string;
     await resolveApproval(db, { ...admin, approvalId: id, decision: 'approve' });
-    expect((await executeApproval(db, id, admin, approvalHandlers([refundTool]))).kind).toBe('failed');
+    expect((await executeApproval(db, id, admin, approvalHandlers([issueRefundTool]))).kind).toBe('failed');
     const r = await step(() => cli.call('issue_refund', args(999_999_999, 'mcp-fail')));
     expect(r.data).toEqual({ status: 'duplicate', approvalId: id, approvalStatus: 'failed', result: { error: 'amount_exceeds_remaining' } });
     expect(r.isError).toBe(true);
@@ -167,7 +167,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
   });
 
   it('denied (role_not_permitted): a reader cannot request a write', async () => {
-    const reader = await mcpClient(db, { actor: 'reader-mcp', role: 'reader' }, [refundTool]);
+    const reader = await mcpClient(db, { actor: 'reader-mcp', role: 'reader' }, [issueRefundTool]);
     try {
       const r = await step(() => reader.call('issue_refund', args(100, 'mcp-reader')));
       expect(r).toMatchObject({ isError: true, data: { error: 'denied', reason: 'role_not_permitted' } });

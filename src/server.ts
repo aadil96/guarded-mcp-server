@@ -4,9 +4,10 @@ import { AuditTracker } from './audit/transport.js';
 import type { AppDb } from './db/types.js';
 import { type DefinedTool, registerTools } from './tools/framework.js';
 import { readTools } from './tools/read.js';
+import { writeTools } from './tools/write.js';
 
-/** Every tool the server exposes. Write tools join this list via defineWriteTool. */
-export const serverTools: readonly DefinedTool[] = readTools;
+/** Every tool the server exposes. */
+export const serverTools: readonly DefinedTool[] = [...readTools, ...writeTools];
 
 /** Pass the same tracker to auditingTransport() so SDK-rejected calls are audited exactly once. */
 export function createServer(db: AppDb, caller: Caller = callerFromEnv(), tracker = new AuditTracker(), tools: readonly DefinedTool[] = serverTools) {
