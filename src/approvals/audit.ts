@@ -17,15 +17,15 @@ const MAX_DEPTH = 8;
 const MAX_KEYS = 100;
 const MAX_NODES = 2000;
 
-type Walk = { path: WeakSet<object>; budget: number; redact: boolean; truncate: boolean };
+type Walk = { path: WeakSet<object>; budget: number; redact: boolean; truncate: boolean; keys?: RegExp };
 
 /**
  * Redact and make JSON-safe in one bounded pass: runtime-rejected input may hold bigints,
  * functions, symbols or cycles, and none of those may stop the audit row from being written.
  * A global node budget bounds total work even for shared-reference graphs.
  */
-export function redact(value: unknown): unknown {
-  return walk(value, 0, { path: new WeakSet(), budget: MAX_NODES, redact: true, truncate: true });
+export function redact(value: unknown, sensitiveKeys: RegExp = SENSITIVE): unknown {
+  return walk(value, 0, { path: new WeakSet(), budget: MAX_NODES, redact: true, truncate: true, keys: sensitiveKeys });
 }
 
 /**
@@ -70,7 +70,7 @@ function walk(value: unknown, depth: number, w: Walk): unknown {
       if (w.budget <= 0) { out['…'] = '[truncated]'; break; }
       let v: unknown;
       try { v = (value as Record<string, unknown>)[k]; } catch { v = '[unreadable]'; }
-      out[uniqueKey(out, jsonbSafe(k))] = w.redact && SENSITIVE.test(k) ? '[redacted]' : walk(v, depth + 1, w);
+      out[uniqueKey(out, jsonbSafe(k))] = w.redact && (w.keys ?? SENSITIVE).test(k) ? '[redacted]' : walk(v, depth + 1, w);
     }
     return out;
   } finally {

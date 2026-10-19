@@ -38,3 +38,5 @@ jobs:
         run: pnpm seed && pnpm seed
       - name: Verify row counts after double seed
         run: pnpm verify:seed
+      - name: Smoke test the stdio server on real Postgres 16
+        run: pnpm smoke "$(pnpm -s tsx -e "import {seedId} from './src/db/seed.ts'; console.log(seedId('order:4'))")"

@@ -1,4 +1,4 @@
-import pg from 'pg';
+import { createAppPool } from '../src/db/connect.js';
 import type { Db, Sql } from '../src/approvals/index.js';
 import type { TestClient } from './helpers.js';
 
@@ -9,9 +9,8 @@ import type { TestClient } from './helpers.js';
  */
 export function approvalsDb(client: TestClient, url?: string): Db & { close(): Promise<void> } {
   if (url) {
-    const pool = new pg.Pool({ connectionString: url, max: 4 });
-    // Least privilege: every approvals path runs as meridian_app, never as the owner.
-    pool.on('connect', (c) => { c.query('set role meridian_app').catch(() => undefined); });
+    // The production pool: every connection enters meridian_app and fails closed if it can't.
+    const pool = createAppPool(url);
     return {
       query: async (q, p) => ({ rows: (await pool.query(q, p)).rows }),
       async transaction(fn) {
