@@ -49,5 +49,5 @@ export async function freshDb() {
     },
     close: () => pgClient.end(),
   };
-  return { client, db, url: dbUrl.toString() };
+  return { client, db, url: dbUrl.toString() as string | undefined };
 }
