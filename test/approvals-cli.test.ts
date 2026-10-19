@@ -88,6 +88,18 @@ describe('approvals console', () => {
     expect(await status(id)).toBe('pending');
   });
 
+  it('rejected tokens are never stored: the audit row keeps only the command, a valid id and an argument count', async () => {
+    const id = await pending();
+    const secret = 'sk-live-SECRET-9931';
+    for (const argv of [['approve', id, '--token', secret], [secret], ['approve', secret]]) {
+      await cli(argv, admin);
+      const a = await one<{ arguments: unknown }>('select arguments from audit_events order by created_at desc, id desc limit 1');
+      expect(JSON.stringify(a.arguments), argv.join(' ')).not.toContain(secret);
+    }
+    const a = await one<{ arguments: unknown }>(`select arguments from audit_events where tool = 'approvals_cli' and error_code = 'unexpected_arguments' order by created_at desc, id desc limit 1`);
+    expect(a.arguments).toEqual({ command: 'approve', approvalId: id, argCount: 4 });
+  });
+
   it('a malformed id or unknown command is a usage error, audited once', async () => {
     for (const argv of [['approve', 'not-a-uuid'], ['approve'], ['frobnicate', '00000000-0000-4000-8000-000000000000'], []]) {
       const before = await audits();

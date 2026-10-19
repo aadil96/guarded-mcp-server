@@ -20,6 +20,19 @@ const USAGE = 'usage: pnpm approvals list | approve <id> | deny <id> | execute <
 const COMMANDS = new Set(['list', 'approve', 'deny', 'execute']);
 
 /**
+ * What a refused invocation records: the command if it is one, the id if it parses, and how many tokens there were.
+ * Never the raw tokens: a mistyped secret (`--token sk-…`) must not land in the append-only audit table.
+ */
+function refusedArgs(argv: readonly string[]) {
+  const [command, id] = argv;
+  return {
+    command: command !== undefined && COMMANDS.has(command) ? command : null,
+    approvalId: zApprovalId.safeParse(id).data ?? null,
+    argCount: argv.length,
+  };
+}
+
+/**
  * The sanctioned approve/deny/execute entrypoint. Argv carries only a command and an approval id: any other
  * token (a forged --actor or --role, say) is refused and audited, so identity can only come from deps.caller.
  * Every outcome writes exactly one audit row: approvals functions audit their own, the console audits the rest.
@@ -29,7 +42,7 @@ export async function runApprovalsCli(argv: readonly string[], deps: ApprovalsCl
   const startedAt = performance.now();
   const refuse = async (error: string): Promise<CliResult> => {
     await inAppTx(db, (tx) => writeAudit(tx, {
-      actor: caller.actor, role: caller.role, tool: 'approvals_cli', args: { argv: argv.slice(0, 8).map((a) => a.slice(0, 200)) },
+      actor: caller.actor, role: caller.role, tool: 'approvals_cli', args: refusedArgs(argv),
       outcome: 'error', startedAt, correlationId: randomUUID(), errorCode: error,
     }));
     return { code: 2, output: { kind: 'usage', error, usage: USAGE } };
