@@ -27,7 +27,7 @@ export async function freshDb() {
       },
       close: () => pglite.close(),
     };
-    return { client, db };
+    return { client, db, url: undefined as string | undefined };
   }
 
   const name = `t_${randomUUID().replaceAll('-', '')}`;
@@ -49,5 +49,5 @@ export async function freshDb() {
     },
     close: () => pgClient.end(),
   };
-  return { client, db };
+  return { client, db, url: dbUrl.toString() as string | undefined };
 }
