@@ -13,6 +13,8 @@ import { type Rejection, RejectionAuditor, type RejectionLimits } from './reject
 export const MCP_PATH = '/mcp';
 export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
+/** A bare host or bracketed IPv6 literal with an optional port. Userinfo, paths and the like are refused before the SDK's allowlist check. */
+const HOST_SYNTAX = /^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|[1-9]\d{0,3}|0))?$/;
 
 export type HttpOptions = {
   db: AppDb;
@@ -89,7 +91,7 @@ export function startHttpServer(opts: HttpOptions) {
       res.setHeader('connection', 'close');
       return reject(res, { ip, method, status: 413, errorCode: 'body_too_large' }, { error: 'body_too_large', maxBytes: maxBody });
     }
-    if (!validateHostHeader(req.headers.host, hosts).ok) {
+    if (!HOST_SYNTAX.test(req.headers.host ?? '') || !validateHostHeader(req.headers.host, hosts).ok) {
       return reject(res, { ip, method, status: 403, errorCode: 'invalid_host' }, { error: 'invalid_host' });
     }
     if (!validateOriginHeader(req.headers.origin, origins).ok) {

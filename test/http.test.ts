@@ -166,6 +166,19 @@ describe('HTTP transport: request guards', () => {
     });
     expect(rebound).toBe(403);
     expect(await lastAudit()).toMatchObject({ error_code: 'invalid_host' });
+    for (const host of ['user@localhost', 'user:pw@127.0.0.1', 'localhost/x', 'localhost:99999']) {
+      const before = await auditCount();
+      const status = await new Promise<number>((resolve, reject) => {
+        import('node:http').then(({ request }) => {
+          const req = request(srv.url, { method: 'POST', headers: { host, ...auth, 'content-type': 'application/json' } }, (res) => { res.resume(); resolve(res.statusCode ?? 0); });
+          req.on('error', reject);
+          req.end('{}');
+        }, reject);
+      });
+      expect(status, host).toBe(403);
+      expect(await auditCount()).toBe(before + 1);
+      expect(await lastAudit()).toMatchObject({ error_code: 'invalid_host' });
+    }
   });
 
   it('caps the body at 1 MiB with 413, declared or streamed, before parsing', async () => {
