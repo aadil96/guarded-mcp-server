@@ -6,7 +6,7 @@ An MCP server for a **fake** wholesale business database (Meridian Supply Co.). 
 
 ## Status
 
-Work in progress. The read tools run over stdio (`pnpm start`). Write tools and approvals are not built yet.
+Work in progress. The tools run over stdio (`pnpm start`). `issue_refund` only creates a pending approval: there is no shipped way to approve or execute it yet (https://github.com/aadil96/guarded-mcp-server/issues/18), so no money moves.
 
 ## Tools
 
