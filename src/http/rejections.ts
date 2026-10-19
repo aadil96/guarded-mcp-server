@@ -64,11 +64,15 @@ export class RejectionAuditor {
     return true;
   }
 
+  private countDropped(ip: string, n: number) {
+    const key = this.dropped.has(ip) || this.dropped.size < 100 ? ip : OTHER;
+    this.dropped.set(key, (this.dropped.get(key) ?? 0) + n);
+  }
+
   /** Returns true if a row was written, false if it was dropped by the limit. */
   async record(r: Rejection): Promise<boolean> {
     if (!this.take(r.ip)) {
-      const key = this.dropped.has(r.ip) || this.dropped.size < 100 ? r.ip : OTHER;
-      this.dropped.set(key, (this.dropped.get(key) ?? 0) + 1);
+      this.countDropped(r.ip, 1);
       return false;
     }
     const startedAt = performance.now();
@@ -84,12 +88,18 @@ export class RejectionAuditor {
     if (this.dropped.size === 0) return 0;
     const byIp = Object.fromEntries(this.dropped);
     const total = [...this.dropped.values()].reduce((a, b) => a + b, 0);
+    const captured = this.dropped;
     this.dropped = new Map();
     const startedAt = performance.now();
-    await inAppTx(this.db, (tx) => writeAudit(tx, {
-      actor: 'anonymous', role: 'invalid', tool: 'http', outcome: 'denied', startedAt,
-      correlationId: randomUUID(), errorCode: 'rejections_dropped', args: { total, byIp },
-    }));
+    try {
+      await inAppTx(this.db, (tx) => writeAudit(tx, {
+        actor: 'anonymous', role: 'invalid', tool: 'http', outcome: 'denied', startedAt,
+        correlationId: randomUUID(), errorCode: 'rejections_dropped', args: { total, byIp },
+      }));
+    } catch (e) {
+      for (const [ip, n] of captured) this.countDropped(ip, n);
+      throw e;
+    }
     return total;
   }
 
