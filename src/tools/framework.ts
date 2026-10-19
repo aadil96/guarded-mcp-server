@@ -147,7 +147,8 @@ export function mapRequestWriteResult(r: RequestWriteResult): CallToolResult {
     case 'denied':
       return text({ error: 'denied', reason: r.reason }, true);
     case 'invalid_args':
-      return text({ error: 'invalid_args', issues: r.issues }, true);
+      // Path, code and message only: never echo input values, which may be sensitive.
+      return text({ error: 'invalid_args', issues: r.issues.map((i) => ({ code: i.code, path: i.path, message: i.message })) }, true);
     default:
       return assertNever(r);
   }

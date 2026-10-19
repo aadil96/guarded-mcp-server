@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { sql } from 'drizzle-orm';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as z from 'zod';
 import { executeApproval, resolveApproval } from '../src/approvals/index.js';
 import type { RequestWriteResult } from '../src/approvals/types.js';
@@ -52,7 +53,7 @@ describe('mapRequestWriteResult keeps every field per outcome', () => {
     [{ kind: 'duplicate', approvalId: id, status: 'failed', result: { error: 'amount_exceeds_remaining' } }, true, { status: 'duplicate', approvalId: id, approvalStatus: 'failed', result: { error: 'amount_exceeds_remaining' } }],
     [{ kind: 'conflict', approvalId: id }, true, { error: 'conflict', reason: 'idempotency_key_reused', approvalId: id }],
     [{ kind: 'denied', reason: 'previously_denied' }, true, { error: 'denied', reason: 'previously_denied' }],
-    [{ kind: 'invalid_args', issues: [{ code: 'custom', path: ['amount_paise'], message: 'bad', input: 1 } as never] }, true, { error: 'invalid_args', issues: [{ code: 'custom', path: ['amount_paise'], message: 'bad' }] }],
+    [{ kind: 'invalid_args', issues: [{ code: 'custom', path: ['card'], message: 'bad', input: '4111-secret' } as never] }, true, { error: 'invalid_args', issues: [{ code: 'custom', path: ['card'], message: 'bad' }] }],
   ];
   for (const [r, isError, data] of cases) {
     it(`${r.kind}${r.kind === 'duplicate' ? ` (${r.status})` : ''}`, () => {
@@ -60,6 +61,7 @@ describe('mapRequestWriteResult keeps every field per outcome', () => {
       expect(out.type).toBe('text');
       expect(out.isError).toBe(isError);
       expect(out.data).toMatchObject(data);
+      expect(JSON.stringify(out.data)).not.toContain('4111-secret');
     });
   }
 });
@@ -154,5 +156,28 @@ describe('defineWriteTool over MCP on the approvals module', () => {
     // Over 200 UTF-8 bytes but under 200 chars, so the SDK schema passes and the approvals module rejects.
     const r = await step(() => cli.call('issue_refund', args(100, 'é'.repeat(150))));
     expect(r).toMatchObject({ isError: true, data: { error: 'invalid_args', issues: [expect.objectContaining({ path: ['idempotencyKey'] })] } });
+  });
+});
+
+describe('read tool failures are audited in the same transaction', () => {
+  it('a query PostgreSQL rejects still writes one audit row (internal_error) and returns an error result', async () => {
+    const ctx = await freshDb();
+    let db: AppDb;
+    if (ctx.url) db = await connectAsApp(ctx.url);
+    else { await ctx.client.query('set role meridian_app'); db = ctx.db as unknown as AppDb; }
+    const boom = defineReadTool({ name: 'boom', description: 'fails in SQL', input: z.strictObject({}), run: (tx) => tx.execute(sql`select 1 / 0`) });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cli = await mcpClient(db, { actor: 'r', role: 'reader' }, [boom]);
+    try {
+      const r = await cli.call('boom', {});
+      expect(r).toMatchObject({ isError: true, data: { error: 'internal_error' } });
+      const rows = (await ctx.client.query<{ tool: string; error_code: string }>('select tool, error_code from audit_events')).rows;
+      expect(rows).toEqual([{ tool: 'boom', error_code: 'internal_error' }]);
+    } finally {
+      vi.restoreAllMocks();
+      await cli.close();
+      await closeAppDb(db);
+      await ctx.client.close();
+    }
   });
 });
