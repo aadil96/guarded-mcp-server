@@ -12,7 +12,8 @@ const caller = { actor: 'test-actor', role: 'reader' as const };
 const auditCount = async () => (await ctx.client.query<{ n: number }>('select count(*)::int n from audit_events')).rows[0].n;
 
 async function call(name: keyof typeof readTools, args: unknown = {}) {
-  const r = await callTool(ctx.db, caller, name, args);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = await callTool(ctx.db as any, caller, name, args);
   return { isError: r.isError === true, data: JSON.parse(r.content[0].text) };
 }
 
@@ -134,7 +135,8 @@ describe('MCP server over in-memory transport', () => {
   it('lists exactly the 8 read tools and serves get_order', async () => {
     const [clientT, serverT] = InMemoryTransport.createLinkedPair();
     const tracker = new AuditTracker();
-    await createServer(ctx.db, caller, tracker).connect(auditingTransport(serverT, ctx.db, caller, tracker));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await createServer(ctx.db as any, caller, tracker).connect(auditingTransport(serverT, ctx.db as any, caller, tracker));
     const pending = new Map<number, (m: JSONRPCMessage) => void>();
     clientT.onmessage = (m) => { if ('id' in m && typeof m.id === 'number') pending.get(m.id)?.(m); };
     await clientT.start();

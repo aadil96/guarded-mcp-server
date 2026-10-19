@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApprovals, type Db, defaultHandlers, type HandlerMap, executeApproval, loadApprovalsConfig, requestWrite, resolveApproval } from '../../src/approvals/index.js';
+import { createApprovals, defaultHandlers, type HandlerMap, executeApproval, loadApprovalsConfig, requestWrite, resolveApproval } from '../../src/approvals/index.js';
 import { seed, seedId } from '../../src/db/seed.js';
-import { approvalsDb } from '../approvals-db.js';
+import { connectAsApp } from '../../src/db/index.js';
+import type { AppDb } from '../../src/db/types.js';
 import { freshDb } from '../helpers.js';
 
 let ctx: Awaited<ReturnType<typeof freshDb>>;
-let db: Db & { close(): Promise<void> };
+let db: AppDb & { close?: () => Promise<void> };
 const op = { actor: 'op-1', role: 'operator' as const };
 const admin = { actor: 'admin-1', role: 'admin' as const };
 const reader = { actor: 'reader-1', role: 'reader' as const };
@@ -35,9 +36,18 @@ async function approved(key: string, args: Record<string, unknown>) {
 beforeAll(async () => {
   ctx = await freshDb();
   await seed(ctx.db);
-  db = approvalsDb(ctx.client, ctx.url);
+  if (ctx.url) {
+    db = await connectAsApp(ctx.url);
+  } else {
+    await ctx.client.query('set role meridian_app');
+    db = ctx.db as unknown as AppDb;
+  }
 });
-afterAll(async () => { await db.close(); await ctx.client.close(); });
+afterAll(async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (typeof (db as any).close === 'function') await (db as any).close();
+  await ctx.client.close();
+});
 
 describe('T1 idempotency', () => {
   it('same key + same args: one approval, pending repeat, duplicate replay after execution, one refund', async () => {
@@ -256,8 +266,9 @@ describe('argument validation and denied replay', () => {
 
 describe('audit', () => {
   it('runs as meridian_app, which cannot UPDATE audit_events', async () => {
-    expect((await db.query<{ u: string }>('select current_user u')).rows[0].u).toBe('meridian_app');
-    await expect(db.query(`update audit_events set outcome = 'ok'`)).rejects.toThrow(/permission denied|append-only/);
+    const who = await ctx.client.query<{ u: string }>('select current_user u');
+    expect(who.rows[0].u).toBe('meridian_app');
+    await expect(ctx.client.query(`update audit_events set outcome = 'ok'`)).rejects.toThrow(/permission denied|append-only/);
   });
   it('redacts sensitive args and records every outcome', async () => {
     await requestWrite(db, { ...reader, tool: 'issue_refund', args: { ...refundArgs(seedId('invoice:14'), 1), customer_email: 'x@example.test' }, idempotencyKey: 't-audit' });
@@ -268,12 +279,32 @@ describe('audit', () => {
 });
 
 /** Same Db, but any audit insert inside a transaction fails, to prove the business write rolls back with it. */
-const auditFailing = (inner: Db): Db => ({
-  query: (q, p) => inner.query(q, p),
-  transaction: (fn) => inner.transaction((tx) => fn({
-    query: (q, p) => (/insert into audit_events/i.test(q) ? Promise.reject(new Error('forced audit failure')) : tx.query(q, p)),
-  })),
-});
+const auditFailing = (inner: AppDb): AppDb => {
+  const wrapped = Object.create(inner);
+  wrapped.transaction = async (fn: (tx: AppDb) => Promise<unknown>) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (inner as any).transaction(async (tx: AppDb) => {
+      const proxy = Object.create(tx);
+      // Intercept INSERTs into audit_events; drizzle .execute(sql`...`) paths contain the table name.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      proxy.execute = async (q: any) => {
+        const text = String(q?.query ?? q);
+        if (/insert into audit_events/i.test(text)) throw new Error('forced audit failure');
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+        return (tx as any).execute(q);
+      };
+      // Intercept builder inserts used by writeAudit(db, ...) in read-path audit.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      proxy.insert = (_table: any) => ({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        values: (_v: any) => { throw new Error('forced audit failure'); },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+      return fn(proxy);
+    });
+  };
+  return wrapped;
+};
 
 describe('audit atomicity (Codex P1/P2)', () => {
   it('requestWrite: forced audit failure rolls back the approval insert', async () => {
