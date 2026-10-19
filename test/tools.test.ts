@@ -182,9 +182,18 @@ describe('MCP server over in-memory transport', () => {
     )).rows;
     expect(extraRows).toEqual([{ tool: 'get_order', arguments: { order_id: seedId('order:1'), api_token: '[redacted]', note: 'x' }, outcome: 'error', error_code: 'invalid_args' }]);
 
+    // NUL / unpaired surrogates in rejected arguments: Postgres jsonb would reject them; the row must still be written.
+    const nul = await rpc('tools/call', { name: 'get_order', arguments: { order_id: seedId('order:1'), nul_note: 'a\u0000b', ['k\uD800']: 'c\uDC00' } });
+    expect(nul.result?.isError).toBe(true);
+    expect(await auditCount()).toBe(before + 5);
+    const nulRows = (await ctx.client.query<Record<string, unknown>>(
+      `select arguments, outcome, error_code from audit_events where tool = 'get_order' and arguments ? 'nul_note'`,
+    )).rows;
+    expect(nulRows).toEqual([{ arguments: { order_id: seedId('order:1'), nul_note: 'a\uFFFDb', ['k\uFFFD']: 'c\uFFFD' }, outcome: 'error', error_code: 'invalid_args' }]);
+
     // tools/list is not a tool call and writes nothing; schemas advertise no extra keys.
     const listed = await rpc('tools/list', {});
-    expect(await auditCount()).toBe(before + 4);
+    expect(await auditCount()).toBe(before + 5);
     for (const t of (listed.result?.tools ?? []) as { inputSchema: { additionalProperties?: unknown } }[]) {
       expect(t.inputSchema.additionalProperties).toBe(false);
     }
