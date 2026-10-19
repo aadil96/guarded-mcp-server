@@ -3,13 +3,13 @@ import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { ZodError } from 'zod';
 import { type Caller, callerFromEnv, writeAudit } from './audit/log.js';
 import { AuditTracker } from './audit/transport.js';
-import type { Db } from './db/types.js';
+import type { AppDb } from './db/types.js';
 import { readTools, ToolError } from './tools/read.js';
 
 type Result = { content: { type: 'text'; text: string }[]; isError?: boolean };
 
 /** Runs one read tool and writes exactly one audit row, whatever the outcome. */
-export async function callTool(db: Db, caller: Caller, name: keyof typeof readTools, args: unknown): Promise<Result> {
+export async function callTool(db: AppDb, caller: Caller, name: keyof typeof readTools, args: unknown): Promise<Result> {
   const started = performance.now();
   const correlationId = randomUUID();
   let result: Result;
@@ -33,7 +33,7 @@ export async function callTool(db: Db, caller: Caller, name: keyof typeof readTo
 }
 
 /** Pass the same tracker to auditingTransport() so SDK-rejected calls are audited exactly once. */
-export function createServer(db: Db, caller: Caller = callerFromEnv(), tracker = new AuditTracker()) {
+export function createServer(db: AppDb, caller: Caller = callerFromEnv(), tracker = new AuditTracker()) {
   const server = new McpServer({ name: 'guarded-mcp-server', version: '0.0.0' }, { capabilities: { tools: {} } });
   for (const [name, tool] of Object.entries(readTools) as [keyof typeof readTools, (typeof readTools)[keyof typeof readTools]][]) {
     server.registerTool(name, {

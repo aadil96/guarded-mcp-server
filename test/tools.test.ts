@@ -1,6 +1,7 @@
 import { InMemoryTransport, type JSONRPCMessage } from '@modelcontextprotocol/server';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { seed, seedId } from '../src/db/seed.js';
+import type { AppDb } from '../src/db/types.js';
 import { AuditTracker, auditingTransport } from '../src/audit/transport.js';
 import { callTool, createServer } from '../src/server.js';
 import { escapeLike, type readTools } from '../src/tools/read.js';
@@ -12,7 +13,7 @@ const caller = { actor: 'test-actor', role: 'reader' as const };
 const auditCount = async () => (await ctx.client.query<{ n: number }>('select count(*)::int n from audit_events')).rows[0].n;
 
 async function call(name: keyof typeof readTools, args: unknown = {}) {
-  const r = await callTool(ctx.db, caller, name, args);
+  const r = await callTool(ctx.db as unknown as AppDb, caller, name, args);
   return { isError: r.isError === true, data: JSON.parse(r.content[0].text) };
 }
 
@@ -134,7 +135,8 @@ describe('MCP server over in-memory transport', () => {
   it('lists exactly the 8 read tools and serves get_order', async () => {
     const [clientT, serverT] = InMemoryTransport.createLinkedPair();
     const tracker = new AuditTracker();
-    await createServer(ctx.db, caller, tracker).connect(auditingTransport(serverT, ctx.db, caller, tracker));
+    const db = ctx.db as unknown as AppDb; // owner handle stands in: these tests cover tool behaviour, not grants
+    await createServer(db, caller, tracker).connect(auditingTransport(serverT, db, caller, tracker));
     const pending = new Map<number, (m: JSONRPCMessage) => void>();
     clientT.onmessage = (m) => { if ('id' in m && typeof m.id === 'number') pending.get(m.id)?.(m); };
     await clientT.start();

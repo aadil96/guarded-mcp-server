@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { AuditOutcome, AuditRole, Sql } from './types.js';
+import { sql } from 'drizzle-orm';
+import { auditEvents } from '../db/schema.js';
+import type { AppQueryable } from '../db/types.js';
+import type { AuditOutcome, AuditRole } from './types.js';
 
 const SENSITIVE = /(email|phone|gstin|token|secret|password|api[_-]?key)/i;
 
@@ -91,11 +94,19 @@ export type AuditEntry = {
   approvalId?: string | null; idempotencyKey?: string | null; startedAt: number; correlationId: string; errorCode?: string | null;
 };
 
-export async function writeAudit(sql: Sql, e: AuditEntry) {
-  await sql.query(
-    `insert into audit_events (id, actor, role, tool, arguments, outcome, approval_id, idempotency_key, duration_ms, correlation_id, error_code)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-    [randomUUID(), e.actor, e.role, e.tool, auditJson(e.args), e.outcome, e.approvalId ?? null,
-      e.idempotencyKey ?? null, Math.max(0, Math.round(performance.now() - e.startedAt)), e.correlationId, e.errorCode ?? null],
-  );
+export async function writeAudit(db: AppQueryable, e: AuditEntry) {
+  await db.insert(auditEvents).values({
+    id: randomUUID(),
+    actor: e.actor,
+    role: e.role,
+    tool: e.tool,
+    // auditJson is already redacted, bounded JSON text; cast it so the driver does not encode it a second time.
+    arguments: sql`${auditJson(e.args)}::jsonb`,
+    outcome: e.outcome,
+    approvalId: e.approvalId ?? null,
+    idempotencyKey: e.idempotencyKey ?? null,
+    durationMs: Math.max(0, Math.round(performance.now() - e.startedAt)),
+    correlationId: e.correlationId,
+    errorCode: e.errorCode ?? null,
+  });
 }

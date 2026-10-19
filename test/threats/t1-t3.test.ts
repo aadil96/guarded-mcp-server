@@ -1,11 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApprovals, type Db, defaultHandlers, type HandlerMap, executeApproval, loadApprovalsConfig, requestWrite, resolveApproval } from '../../src/approvals/index.js';
+import { createApprovals, defaultHandlers, type HandlerMap, executeApproval, loadApprovalsConfig, requestWrite, resolveApproval } from '../../src/approvals/index.js';
 import { seed, seedId } from '../../src/db/seed.js';
-import { approvalsDb } from '../approvals-db.js';
+import { sql } from 'drizzle-orm';
+import { closeAppDb, connectAsApp, queryRows } from '../../src/db/index.js';
+import { auditEvents } from '../../src/db/schema.js';
+import type { AppDb, AppTx } from '../../src/db/types.js';
 import { freshDb } from '../helpers.js';
 
 let ctx: Awaited<ReturnType<typeof freshDb>>;
-let db: Db & { close(): Promise<void> };
+let db: AppDb;
 const op = { actor: 'op-1', role: 'operator' as const };
 const admin = { actor: 'admin-1', role: 'admin' as const };
 const reader = { actor: 'reader-1', role: 'reader' as const };
@@ -35,9 +38,17 @@ async function approved(key: string, args: Record<string, unknown>) {
 beforeAll(async () => {
   ctx = await freshDb();
   await seed(ctx.db);
-  db = approvalsDb(ctx.client, ctx.url);
+  if (ctx.url) {
+    db = await connectAsApp(ctx.url);
+  } else {
+    await ctx.client.query('set role meridian_app');
+    db = ctx.db as unknown as AppDb;
+  }
 });
-afterAll(async () => { await db.close(); await ctx.client.close(); });
+afterAll(async () => {
+  await closeAppDb(db);
+  await ctx.client.close();
+});
 
 describe('T1 idempotency', () => {
   it('same key + same args: one approval, pending repeat, duplicate replay after execution, one refund', async () => {
@@ -256,8 +267,10 @@ describe('argument validation and denied replay', () => {
 
 describe('audit', () => {
   it('runs as meridian_app, which cannot UPDATE audit_events', async () => {
-    expect((await db.query<{ u: string }>('select current_user u')).rows[0].u).toBe('meridian_app');
-    await expect(db.query(`update audit_events set outcome = 'ok'`)).rejects.toThrow(/permission denied|append-only/);
+    const [who] = await queryRows<{ u: string }>(db, sql`select current_user u`);
+    expect(who.u).toBe('meridian_app');
+    await expect(db.execute(sql`update audit_events set outcome = 'ok'`))
+      .rejects.toMatchObject({ cause: { message: expect.stringMatching(/permission denied|append-only/) } });
   });
   it('redacts sensitive args and records every outcome', async () => {
     await requestWrite(db, { ...reader, tool: 'issue_refund', args: { ...refundArgs(seedId('invoice:14'), 1), customer_email: 'x@example.test' }, idempotencyKey: 't-audit' });
@@ -267,13 +280,19 @@ describe('audit', () => {
   });
 });
 
-/** Same Db, but any audit insert inside a transaction fails, to prove the business write rolls back with it. */
-const auditFailing = (inner: Db): Db => ({
-  query: (q, p) => inner.query(q, p),
-  transaction: (fn) => inner.transaction((tx) => fn({
-    query: (q, p) => (/insert into audit_events/i.test(q) ? Promise.reject(new Error('forced audit failure')) : tx.query(q, p)),
-  })),
-});
+/** Same AppDb, but any audit insert inside a transaction fails, to prove the business write rolls back with it. */
+const auditFailing = (inner: AppDb): AppDb => {
+  const wrapped = Object.create(inner) as AppDb;
+  wrapped.transaction = ((fn: (tx: AppTx) => Promise<unknown>) => inner.transaction((tx) => {
+    const failing = Object.create(tx) as AppTx;
+    failing.insert = ((table: unknown) => {
+      if (table === auditEvents) throw new Error('forced audit failure');
+      return tx.insert(table as typeof auditEvents);
+    }) as AppTx['insert'];
+    return fn(failing);
+  })) as AppDb['transaction'];
+  return wrapped;
+};
 
 describe('audit atomicity (Codex P1/P2)', () => {
   it('requestWrite: forced audit failure rolls back the approval insert', async () => {
@@ -571,5 +590,21 @@ describe('runtime input hardening (Codex re-review)', () => {
       if (label === 'result') expect(row.rows[0].result).toMatchObject({ big: '12345678901234567890n', nul: 'a\uFFFDb', lone: 'c\uFFFD', self: '[circular]' });
       else expect(JSON.stringify(row.rows[0].result)).not.toMatch(/\\u0000/);
     }
+  });
+
+  it('a handler query error is stored as the driver message, without the statement or its parameters', async () => {
+    const inv = await sharedInv();
+    const base = defaultHandlers.issue_refund as NonNullable<HandlerMap['issue_refund']>;
+    const handlers: HandlerMap = {
+      issue_refund: { ...base, execute: async (tx) => { await tx.execute(sql`update orders set total_paise = ${987654321}`); return { ok: true, result: {} }; } },
+    };
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 114), idempotencyKey: 'driver-error' }, handlers);
+    if (r.kind !== 'pending') throw new Error(r.kind);
+    await resolveApproval(db, { ...admin, approvalId: r.approvalId, decision: 'approve' });
+    const ex = await executeApproval(db, r.approvalId, admin, handlers);
+    if (ex.kind !== 'failed') throw new Error(ex.kind);
+    expect(ex.error).toMatch(/permission denied/);
+    expect(ex.error).not.toMatch(/Failed query|update orders|987654321/);
+    expect((await lastAudit()).error_code).toBe(ex.error);
   });
 });

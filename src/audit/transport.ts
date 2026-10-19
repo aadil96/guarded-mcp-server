@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { JSONRPCMessage, Transport } from '@modelcontextprotocol/server';
-import type { Db } from '../db/types.js';
+import type { AppDb } from '../db/types.js';
 import { type Caller, writeAudit } from './log.js';
 
 type Id = string | number;
@@ -28,7 +28,7 @@ function isRejection(m: JSONRPCMessage): boolean {
  * exactly one audit row (outcome error, error_code invalid_args). Keyed by JSON-RPC request id.
  */
 export function auditingTransport(
-  inner: Transport, db: Db, caller: Caller, tracker: AuditTracker,
+  inner: Transport, db: AppDb, caller: Caller, tracker: AuditTracker,
   /** Runs once when the connection closes (stdin EOF or close()), e.g. to end the DB pool so the process can exit. */
   onClosed?: () => void | Promise<void>,
 ): Transport {
