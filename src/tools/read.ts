@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import * as z from 'zod';
 import * as s from '../db/schema.js';
-import type { Db } from '../db/types.js';
+import type { AppDb } from '../db/types.js';
 
 export const MAX_PAGE = 50;
 
@@ -32,7 +32,7 @@ function one<T>(rows: T[], what: string): T {
   return rows[0];
 }
 
-type Def<S extends z.ZodObject> = { description: string; input: S; run: (db: Db, a: z.infer<S>) => Promise<unknown> };
+type Def<S extends z.ZodObject> = { description: string; input: S; run: (db: AppDb, a: z.infer<S>) => Promise<unknown> };
 const def = <S extends z.ZodObject>(d: Def<S>) => d;
 
 export const readTools = {
