@@ -10,7 +10,8 @@ export const orderStatus = pgEnum('order_status', ['pending', 'confirmed', 'ship
 export const invoiceStatus = pgEnum('invoice_status', ['unpaid', 'part_paid', 'paid', 'refunded']);
 export const writeTool = pgEnum('write_tool', ['issue_refund', 'update_order_status', 'create_credit_note', 'add_customer_note']);
 export const approvalStatus = pgEnum('approval_status', ['pending', 'approved', 'denied', 'executed', 'failed']);
-export const role = pgEnum('role', ['reader', 'operator', 'admin']);
+// 'invalid' is an audit-only placeholder for calls whose caller metadata failed validation; no caller can hold it.
+export const role = pgEnum('role', ['reader', 'operator', 'admin', 'invalid']);
 export const auditOutcome = pgEnum('audit_outcome', ['ok', 'error', 'denied', 'pending_approval', 'duplicate', 'conflict']);
 
 export const customers = pgTable('customers', {

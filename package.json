@@ -11,7 +11,9 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint .",
-    "verify:seed": "tsx scripts/verify-seed.ts"
+    "verify:seed": "tsx scripts/verify-seed.ts",
+    "start": "tsx src/index.ts",
+    "smoke": "node scripts/smoke-stdio.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.3.1",
