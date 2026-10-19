@@ -30,6 +30,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+      - name: Enforce restricted DB access (no direct pools/drizzle outside db module)
+        run: pnpm check:db-access
       - name: Migrate on real Postgres 16
         run: pnpm db:migrate
       - name: Tests on real Postgres 16 (fresh database per test file)
