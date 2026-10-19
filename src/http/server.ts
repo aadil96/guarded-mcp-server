@@ -13,6 +13,7 @@ import { type Rejection, RejectionAuditor, type RejectionLimits } from './reject
 export const MCP_PATH = '/mcp';
 export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
+export const DEFAULT_AUDIT_WAIT_MS = 1_000;
 const PORT = String.raw`(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|[1-9]\d{0,3}|0))?`;
 const HOSTNAME = String.raw`(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])`;
 /**
@@ -33,6 +34,8 @@ export type HttpOptions = {
   allowedOrigins?: readonly string[];
   maxBodyBytes?: number;
   rejectionLimits?: RejectionLimits;
+  /** How long a refusal waits for its audit row before the response is sent anyway. */
+  auditWaitMs?: number;
   /** How long close() waits for in-flight requests before cutting their connections. */
   shutdownGraceMs?: number;
   /** For tests: the clock the per-IP rejection limit uses. */
@@ -91,12 +94,13 @@ export function startHttpServer(opts: HttpOptions) {
   const rejections = new RejectionAuditor(opts.db, opts.rejectionLimits, opts.now);
   rejections.startPeriodicFlush();
 
+  // The audit row is normally written before the refusal is sent, but a slow database can't hold the response:
+  // after auditWaitMs it is sent anyway, and the write carries on (a failure is counted in the dropped summary).
   const reject = async (res: ServerResponse, r: Rejection, body: unknown, headers?: Record<string, string>) => {
-    try {
-      await rejections.record(r);
-    } catch (e) {
-      console.error('rejection audit failed:', (e as Error).message);
-    }
+    const write = rejections.record(r).catch((e) => { console.error('rejection audit failed:', (e as Error).message); });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([write, new Promise<void>((done) => { timer = setTimeout(done, opts.auditWaitMs ?? DEFAULT_AUDIT_WAIT_MS); })]);
+    clearTimeout(timer);
     sendJson(res, r.status, body, headers);
   };
 

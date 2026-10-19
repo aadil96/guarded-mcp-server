@@ -18,15 +18,27 @@ describe('token config', () => {
     expect(() => parseTokenConfig('# only a comment\n')).toThrow(/no tokens/);
     expect(() => parseTokenConfig('gms_rawtokenvalue alice read')).toThrow(/line 1/);
     expect(() => parseTokenConfig(`sha256:${h('a').toUpperCase()} alice read`)).toThrow(/line 1/);
-    expect(() => parseTokenConfig(`sha256:${h('a')} alice read,admin`)).toThrow(/unknown scope "admin"/);
+    expect(() => parseTokenConfig(`sha256:${h('a')} alice read,admin`)).toThrow(/line 1: unknown scope/);
     expect(() => parseTokenConfig(`sha256:${h('a')} alice write`)).toThrow(/unknown scope/);
     expect(() => parseTokenConfig(`sha256:${h('a')} al!ce read`)).toThrow(/actor/);
     expect(() => parseTokenConfig(`sha256:${h('a')} alice read\nsha256:${h('a')} bob read`)).toThrow(/duplicate token hash/);
     expect(() => parseTokenConfig(`sha256:${h('a')} alice read\nsha256:${h('b')} alice read`)).toThrow(/duplicate actor/);
   });
 
-  it('malformed-line errors never echo the line, which may be a pasted raw token', () => {
-    try { parseTokenConfig('gms_SECRETVALUE123 alice read'); } catch (e) { expect((e as Error).message).not.toContain('SECRETVALUE'); }
+  it('config errors never echo any field, since a pasted raw token can land in any of them', () => {
+    const bad = [
+      'gms_SECRETVALUE123 alice read',
+      `sha256:${h('a')} alice gms_SECRETVALUE123`,
+      `sha256:${h('a')} alice read,gms_SECRETVALUE123`,
+      `sha256:${h('a')} gms_SECRETVALUE123 read\nsha256:${h('b')} gms_SECRETVALUE123 read`,
+      `sha256:${h('a')} gms_SECRET!VALUE read`,
+    ];
+    for (const cfg of bad) {
+      let message = '';
+      try { parseTokenConfig(cfg); } catch (e) { message = (e as Error).message; }
+      expect(message, cfg).toMatch(/^token config line \d+/);
+      expect(message, cfg).not.toContain('SECRET');
+    }
   });
 
   it('loadTokenConfig needs exactly one of MCP_HTTP_TOKENS_FILE and MCP_HTTP_TOKENS', async () => {

@@ -27,7 +27,8 @@ export const sha256Hex = (token: string) => createHash('sha256').update(token, '
 
 /**
  * Parses token config: one `sha256:<64 hex> <actor> <scope[,scope]>` per line, `#` comments and blank lines
- * ignored. Holds hashes only. Throws on anything malformed, a duplicate hash or actor, or an empty config,
+ * ignored. Holds hashes only. Errors name the line number but never a field, since a pasted raw token can sit in
+ * any of them. Throws on anything malformed, a duplicate hash or actor, or an empty config,
  * so the HTTP server refuses to start rather than run with a partial or empty token set.
  */
 export function parseTokenConfig(text: string): TokenEntry[] {
@@ -43,9 +44,9 @@ export function parseTokenConfig(text: string): TokenEntry[] {
     if (!ACTOR.test(actor)) throw new Error(`token config line ${i + 1}: actor must match ${ACTOR}`);
     const scopes = scopeList.split(',');
     const bad = scopes.find((s) => !isScope(s));
-    if (bad !== undefined) throw new Error(`token config line ${i + 1}: unknown scope "${bad}" (allowed: ${SCOPES.join(', ')})`);
+    if (bad !== undefined) throw new Error(`token config line ${i + 1}: unknown scope (allowed: ${SCOPES.join(', ')})`);
     if (hashes.has(hex)) throw new Error(`token config line ${i + 1}: duplicate token hash`);
-    if (actors.has(actor)) throw new Error(`token config line ${i + 1}: duplicate actor "${actor}"`);
+    if (actors.has(actor)) throw new Error(`token config line ${i + 1}: duplicate actor`);
     hashes.add(hex);
     actors.add(actor);
     entries.push({ hash: Buffer.from(hex, 'hex'), actor, scopes: expandScopes(scopes as Scope[]) });

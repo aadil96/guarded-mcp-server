@@ -134,7 +134,7 @@ describe('HTTP transport: scopes', () => {
       const r = await c.callTool({ name: 'resolve_approval', arguments: {} }).catch((e: Error) => ({ isError: true, content: [{ type: 'text', text: JSON.stringify(e.message) }] }));
       expect(r.isError).toBe(true);
     } finally { await c.close(); }
-    expect(() => parseTokenConfig(`sha256:${'a'.repeat(64)} root admin`)).toThrow(/unknown scope "admin"/);
+    expect(() => parseTokenConfig(`sha256:${'a'.repeat(64)} root admin`)).toThrow(/line 1: unknown scope/);
   });
 
   it('the token actor cannot approve their own request through the console either', async () => {
@@ -363,6 +363,24 @@ describe('HTTP transport: rejection limiter memory', () => {
     expect(await auditor.flush()).toBe(2);
     expect(await lastAudit()).toMatchObject({ error_code: 'rejections_dropped', arguments: { total: 2, byIp: { '10.0.0.4': 2 } } });
     await auditor.close();
+  });
+
+  it('a refusal is answered promptly even when its audit write hangs', async () => {
+    let hang = false;
+    const stuck = new Proxy(db, {
+      get(t, p) {
+        if (p === 'transaction' && hang) return () => new Promise(() => {});
+        const v = Reflect.get(t, p);
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    const s2 = await startHttpServer({ db: stuck, tokens, auditWaitMs: 200 });
+    hang = true;
+    const t0 = Date.now();
+    expect((await post({ authorization: 'Bearer nope' }, undefined, s2.url)).status).toBe(401);
+    expect(Date.now() - t0).toBeLessThan(1500);
+    hang = false;
+    await s2.close();
   });
 
   it('server close resolves even if the final rejection summary cannot be written', async () => {

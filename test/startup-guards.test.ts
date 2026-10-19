@@ -25,7 +25,7 @@ describe('HTTP transport fails closed on token config', () => {
   });
 
   it('exits 1 on a malformed or admin-scoped token line, without echoing it', async () => {
-    for (const cfg of ['gms_SECRETRAW alice read', `sha256:${hash} root admin`]) {
+    for (const cfg of ['gms_SECRETRAW alice read', `sha256:${hash} root admin`, `sha256:${hash} root gms_SECRETRAW`]) {
       const { code, stderr } = await startServer({ MCP_TRANSPORT: 'http', MCP_HTTP_TOKENS: cfg, DATABASE_URL: '' });
       expect(code).toBe(1);
       expect(stderr).toMatch(/refusing to start, HTTP token config: token config line 1/);
