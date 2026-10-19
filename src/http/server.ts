@@ -1,5 +1,6 @@
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { finished } from 'node:stream/promises';
 import {
   localhostAllowedHostnames, localhostAllowedOrigins, validateHostHeader, validateOriginHeader, WebStandardStreamableHTTPServerTransport,
 } from '@modelcontextprotocol/server';
@@ -130,12 +131,18 @@ export function startHttpServer(opts: HttpOptions) {
     }
   }
 
-  const active = new Set<Promise<void>>();
+  const active = new Set<Promise<unknown>>();
+  let closing = false;
   const http = createHttpServer((req, res) => {
-    const done = handle(req, res).catch((e) => {
-      console.error('http request failed:', e instanceof Error ? e.message : 'unknown error');
-      sendJson(res, 500, { error: 'internal_error' });
-    }).finally(() => { active.delete(done); });
+    // A request that arrives once shutdown has begun (for example pipelined on a keep-alive socket) is refused
+    // without touching the database, which is about to close. It is not audited for the same reason.
+    const handled = closing
+      ? Promise.resolve(sendJson(res, 503, { error: 'shutting_down' }, { connection: 'close' }))
+      : handle(req, res).catch((e) => {
+        console.error('http request failed:', e instanceof Error ? e.message : 'unknown error');
+        sendJson(res, 500, { error: 'internal_error' });
+      });
+    const done = Promise.all([handled, finished(res).catch(() => {})]).finally(() => { active.delete(done); });
     active.add(done);
   });
   http.requestTimeout = 30_000;
@@ -150,13 +157,14 @@ export function startHttpServer(opts: HttpOptions) {
         url: new URL(`http://${host}:${a.port}${MCP_PATH}`),
         rejections,
         close: async () => {
+          closing = true;
           const stopped = new Promise<void>((r) => { http.close(() => r()); });
           http.closeIdleConnections();
           let grace: ReturnType<typeof setTimeout> | undefined;
-          await Promise.race([
-            Promise.allSettled([...active]),
-            new Promise<void>((r) => { grace = setTimeout(r, opts.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS); }),
-          ]);
+          let expired = false;
+          const deadline = new Promise<void>((r) => { grace = setTimeout(() => { expired = true; r(); }, opts.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS); });
+          // Wait on the live set, not a snapshot: a request already in flight may be joined by one parsed later.
+          while (active.size > 0 && !expired) await Promise.race([Promise.allSettled([...active]), deadline]);
           clearTimeout(grace);
           http.closeAllConnections();
           await stopped;

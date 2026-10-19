@@ -330,12 +330,13 @@ describe('HTTP transport: rejection limiter memory', () => {
 
 describe('HTTP transport: shutdown', () => {
   const slowDb = () => {
-    const ctl = { delayMs: 0, hang: false };
+    const ctl = { delayMs: 0, hang: false, transactions: 0 };
     const proxy = new Proxy(db, {
       get(t, p) {
         const v = Reflect.get(t, p);
         if (p === 'transaction') {
           return async (...a: unknown[]) => {
+            ctl.transactions++;
             if (ctl.hang) return new Promise(() => {});
             await new Promise((r) => setTimeout(r, ctl.delayMs));
             return (v as (...x: unknown[]) => unknown).apply(t, a);
@@ -369,6 +370,39 @@ describe('HTTP transport: shutdown', () => {
     expect(await auditCount()).toBe(before + 1);
     expect(await lastAudit()).toMatchObject({ actor: 'reader-bot', tool: 'get_invoice', outcome: 'ok' });
     await c.close().catch(() => {});
+  });
+
+  it('a request pipelined on a keep-alive socket after close() starts gets a 503 without touching the DB; the first keeps its response and audit row', async () => {
+    const slow = slowDb();
+    const s2 = await startHttpServer({ db: slow.db, tokens });
+    const before = await auditCount();
+    const { connect: tcp } = await import('node:net');
+    const sock = tcp(Number(s2.url.port), s2.url.hostname);
+    await new Promise<void>((r) => sock.once('connect', () => r()));
+    let raw = '';
+    sock.on('data', (d) => { raw += d.toString('latin1'); });
+    const ended = new Promise<void>((r) => { sock.once('close', () => r()); });
+    const call = (id: number) => {
+      const body = JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'get_invoice', arguments: { invoice_id: invoiceId } } });
+      return `POST /mcp HTTP/1.1\r\nHost: ${s2.url.host}\r\nAuthorization: Bearer ${reader.token}\r\nContent-Type: application/json\r\n`
+        + `Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-06-18\r\nConnection: keep-alive\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+    };
+    slow.ctl.delayMs = 300;
+    sock.write(call(1));
+    await new Promise((r) => setTimeout(r, 50));
+    const closing = s2.close();
+    await new Promise((r) => setTimeout(r, 20));
+    const txBefore2 = slow.ctl.transactions;
+    sock.write(call(2));
+    await closing;
+    sock.end();
+    await ended;
+    const statuses = [...raw.matchAll(/^HTTP\/1\.1 (\d{3})/gm)].map((m) => Number(m[1]));
+    expect(statuses).toEqual([200, 503]);
+    expect(raw).toContain('shutting_down');
+    expect(slow.ctl.transactions).toBe(txBefore2);
+    expect(await auditCount()).toBe(before + 1);
+    expect(await lastAudit()).toMatchObject({ actor: 'reader-bot', tool: 'get_invoice', outcome: 'ok' });
   });
 
   it('close force-closes a request still running after the grace period', async () => {
