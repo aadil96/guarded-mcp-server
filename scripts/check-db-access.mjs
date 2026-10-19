@@ -13,8 +13,10 @@ const DRIVER = String.raw`(?:pg|pg-pool|postgres|@electric-sql/pglite(?:/[\w./-]
 const DRIVER_IMPORT = new RegExp(
   String.raw`(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)['"\x60]${DRIVER}['"\x60]`,
 );
-// Role switching anywhere but the DB module could undo SET ROLE meridian_app.
-const ROLE_CHANGE = /\b(?:RESET\s+ROLE|SET\s+(?:SESSION\s+|LOCAL\s+)?ROLE|SET\s+SESSION\s+AUTHORIZATION|RESET\s+SESSION\s+AUTHORIZATION)\b/i;
+// Role switching anywhere but the DB module could undo SET ROLE meridian_app. set_config() is the functional
+// form of SET (set_config('role', 'none', false) resets the role), and its setting name can be a bound
+// parameter, so any set_config call is banned rather than only literal 'role' / 'session_authorization'.
+const ROLE_CHANGE = /\b(?:RESET\s+ROLE|SET\s+(?:SESSION\s+|LOCAL\s+)?ROLE|SET\s+SESSION\s+AUTHORIZATION|RESET\s+SESSION\s+AUTHORIZATION|RESET\s+ALL|set_config\s*\()/i;
 
 // Exactly these files may import a driver: the app entrypoint, owner-only scripts, and the test fixture
 // that creates throwaway databases as the owner.

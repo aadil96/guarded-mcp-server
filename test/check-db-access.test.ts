@@ -41,7 +41,11 @@ describe('check-db-access', () => {
   });
 
   it('rejects role changes outside the DB module', () => {
-    for (const q of ['RESET ROLE', 'set role meridian_owner', 'SET SESSION AUTHORIZATION x']) {
+    for (const q of [
+      'RESET ROLE', 'set role meridian_owner', 'SET SESSION AUTHORIZATION x', 'RESET ALL',
+      "select set_config('role', 'none', false)", "SELECT SET_CONFIG ( 'session_authorization', 'x', false )",
+      'select set_config($1, $2, false)',
+    ]) {
       const r = check({ 'src/approvals/x.ts': `await db.execute(sql\`${q}\`);` });
       expect(r.code, q).toBe(1);
       expect(r.out).toContain('src/approvals/x.ts: changes the database role');
