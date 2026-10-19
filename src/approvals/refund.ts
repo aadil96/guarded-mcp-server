@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Approval, ToolHandler } from './types.js';
-import type { AppDb, AppTx } from '../db/types.js';
+import { queryRows } from '../db/index.js';
 
 /** Integer-only INR formatting (en-IN grouping); no float division, so every paise is exact. */
 export function formatInr(paise: number | bigint): string {
@@ -28,30 +28,30 @@ function parse(args: Record<string, unknown>) {
 
 export const issueRefund: ToolHandler = {
   schema: issueRefundSchema,
-  async summarize(db: AppDb | AppTx, args) {
+  async summarize(db, args) {
     const { invoiceId, amount } = parse(args);
-    const r = await (db as AppDb).execute(sql`select invoice_number from invoices where id = ${invoiceId}`);
-    return `Refund ${formatInr(amount)} on ${(r as unknown as { rows: { invoice_number: string }[] }).rows[0]?.invoice_number ?? `invoice ${invoiceId}`}`;
+    const [inv] = await queryRows<{ invoice_number: string }>(db, sql`select invoice_number from invoices where id = ${invoiceId}`);
+    return `Refund ${formatInr(amount)} on ${inv?.invoice_number ?? `invoice ${invoiceId}`}`;
   },
-  async execute(tx: AppTx, approval: Approval) {
+  async execute(tx, approval: Approval) {
     const { invoiceId, amount, reason } = parse(approval.arguments);
     // Lock the invoice so concurrent refunds on it serialize and the remaining check is authoritative.
-    const inv = await (tx as AppDb).execute(sql`select paid_paise from invoices where id = ${invoiceId} for update`);
-    if (!inv.rows[0]) return { ok: false, error: 'invoice_not_found' };
+    const [inv] = await queryRows<{ paid_paise: string | number }>(tx, sql`select paid_paise from invoices where id = ${invoiceId} for update`);
+    if (!inv) return { ok: false, error: 'invoice_not_found' };
     // Cap is what the customer actually paid, not the invoice total.
     // bigint end to end: paise sums can exceed Number.MAX_SAFE_INTEGER.
-    const paid = BigInt((inv as unknown as { rows: { paid_paise: string | number }[] }).rows[0].paid_paise);
+    const paid = BigInt(inv.paid_paise);
     const amt = BigInt(amount);
-    const prior = await (tx as AppDb).execute(sql`select coalesce(sum(amount_paise), 0) s from refunds where invoice_id = ${invoiceId}`);
-    const remaining = paid - BigInt((prior as unknown as { rows: { s: string | number }[] }).rows[0].s);
+    const [prior] = await queryRows<{ s: string | number }>(tx, sql`select coalesce(sum(amount_paise), 0) s from refunds where invoice_id = ${invoiceId}`);
+    const remaining = paid - BigInt(prior.s);
     if (amt > remaining) return { ok: false, error: 'amount_exceeds_remaining' };
     const refundId = crypto.randomUUID();
-    await (tx as AppDb).execute(sql`
+    await tx.execute(sql`
       insert into refunds (id, invoice_id, approval_id, amount_paise, reason)
       values (${refundId}, ${invoiceId}, ${approval.id}, ${amount}, ${reason})
     `);
     const fully = amt === remaining; // all paid money refunded
-    if (fully) await (tx as AppDb).execute(sql`update invoices set status = 'refunded' where id = ${invoiceId}`);
+    if (fully) await tx.execute(sql`update invoices set status = 'refunded' where id = ${invoiceId}`);
     return { ok: true, result: { refundId, invoiceId, amountPaise: amount, remainingPaise: (remaining - amt).toString(), invoiceRefunded: fully } };
   },
 };

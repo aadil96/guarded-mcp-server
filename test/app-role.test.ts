@@ -1,14 +1,15 @@
+import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { callerFromEnv } from '../src/audit/log.js';
-import { connectAsApp } from '../src/db/index.js';
+import { closeAppDb, connectAsApp } from '../src/db/index.js';
 import { seed, seedId } from '../src/db/seed.js';
 import type { AppDb } from '../src/db/types.js';
 import { callTool } from '../src/server.js';
 import type { readTools } from '../src/tools/read.js';
-import { freshDb } from './helpers.js';
+import { freshDb, startServer } from './helpers.js';
 
-// The server's own db handle: on real PG (CI) the production createAppPool(); on PGlite the
+// The server's own db handle: on real PG (CI) the production connectAsApp(); on PGlite the
 // same SET ROLE issued on the single connection. Seeding happens first, as the owner.
 let ctx: Awaited<ReturnType<typeof freshDb>>;
 let db: AppDb;
@@ -18,11 +19,11 @@ beforeAll(async () => {
   ctx = await freshDb();
   await seed(ctx.db);
   if (ctx.url) {
-    db = await connectAsApp(ctx.url);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    close = async () => { if (typeof (db as any).close === 'function') await (db as any).close(); };
+    const appDb = await connectAsApp(ctx.url);
+    db = appDb;
+    close = () => closeAppDb(appDb);
   } else {
-    await ctx.client.query(`SET ROLE meridian_app`);
+    await ctx.client.query('SET ROLE meridian_app');
     db = ctx.db as unknown as AppDb;
   }
 });
@@ -30,7 +31,7 @@ afterAll(async () => { await close(); });
 
 const run = (q: string) => db.execute(sql.raw(q));
 
-describe(`server db connection runs as meridian_app`, () => {
+describe('server db connection runs as meridian_app', () => {
   it('is the app role, not the owner', async () => {
     const r = await run('select current_user as u');
     expect((r as unknown as { rows: { u: string }[] }).rows[0].u).toBe('meridian_app');
@@ -65,9 +66,12 @@ describe(`server db connection runs as meridian_app`, () => {
 
 // Real PG only: PGlite is a single in-process session with no separate login roles.
 describe.runIf(process.env.DATABASE_URL)('fails closed when SET ROLE is not allowed', () => {
-  it('a login without meridian_app membership cannot obtain an AppDb', async () => {
-    const login = `t_nomember_${Math.random().toString(36).slice(2, 10)}`;
-    const dbName = new URL(ctx.url as string).pathname.slice(1);
+  const login = `t_nomember_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+  let dbName = '';
+  let loginUrl = '';
+
+  beforeAll(async () => {
+    dbName = new URL(ctx.url as string).pathname.slice(1);
     await ctx.client.query(`CREATE ROLE ${login} LOGIN PASSWORD 'pw'`);
     await ctx.client.query(`GRANT CONNECT ON DATABASE ${dbName} TO ${login}`);
     // Give the login direct read access, so a silent fallback to the login user WOULD succeed.
@@ -76,13 +80,22 @@ describe.runIf(process.env.DATABASE_URL)('fails closed when SET ROLE is not allo
     const u = new URL(ctx.url as string);
     u.username = login;
     u.password = 'pw';
-    await expect(connectAsApp(u.toString())).rejects.toThrow();
-    try {
-      await ctx.client.query(`REVOKE ALL ON orders FROM ${login}`);
-      await ctx.client.query(`REVOKE ALL ON SCHEMA public FROM ${login}`);
-      await ctx.client.query(`REVOKE ALL ON DATABASE ${dbName} FROM ${login}`);
-      await ctx.client.query(`DROP ROLE ${login}`);
-    // eslint-disable-next-line no-empty
-    } finally {}
+    loginUrl = u.toString();
+  });
+  afterAll(async () => {
+    await ctx.client.query(`REVOKE ALL ON orders FROM ${login}`);
+    await ctx.client.query(`REVOKE ALL ON SCHEMA public FROM ${login}`);
+    await ctx.client.query(`REVOKE ALL ON DATABASE ${dbName} FROM ${login}`);
+    await ctx.client.query(`DROP ROLE ${login}`);
+  });
+
+  it('connectAsApp rejects a login without meridian_app membership', async () => {
+    await expect(connectAsApp(loginUrl)).rejects.toThrow(/permission denied to set role/);
+  });
+
+  it('the server refuses to start as that login and exits 1', async () => {
+    const { code, stderr } = await startServer({ DATABASE_URL: loginUrl });
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/refusing to start, could not run as meridian_app: permission denied to set role/);
   });
 });

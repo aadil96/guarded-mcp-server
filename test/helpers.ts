@@ -1,4 +1,6 @@
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import { migrate as migratePglite } from 'drizzle-orm/pglite/migrator';
@@ -50,4 +52,15 @@ export async function freshDb() {
     close: () => pgClient.end(),
   };
   return { client, db, url: dbUrl.toString() as string | undefined };
+}
+
+/** Starts the stdio server with stdin closed and resolves with its exit code and stderr. */
+export async function startServer(env: Record<string, string>) {
+  const child = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
+    env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8').on('data', (d: string) => { stderr += d; });
+  const [code] = (await once(child, 'exit')) as [number | null];
+  return { code, stderr };
 }

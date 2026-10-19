@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { auditEvents } from '../db/schema.js';
-import type { AppDb, AppTx } from '../db/types.js';
+import type { AppQueryable } from '../db/types.js';
 import type { AuditOutcome, AuditRole } from './types.js';
 
 const SENSITIVE = /(email|phone|gstin|token|secret|password|api[_-]?key)/i;
@@ -94,15 +94,14 @@ export type AuditEntry = {
   approvalId?: string | null; idempotencyKey?: string | null; startedAt: number; correlationId: string; errorCode?: string | null;
 };
 
-export async function writeAudit(db: AppDb | AppTx, e: AuditEntry) {
-  await (db as AppDb).insert(auditEvents).values({
+export async function writeAudit(db: AppQueryable, e: AuditEntry) {
+  await db.insert(auditEvents).values({
     id: randomUUID(),
     actor: e.actor,
     role: e.role,
     tool: e.tool,
-    // Pass as a bound parameter coerced to jsonb to work on both pg and pglite drivers.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    arguments: sql`${auditJson(e.args)}::jsonb` as any,
+    // auditJson is already redacted, bounded JSON text; cast it so the driver does not encode it a second time.
+    arguments: sql`${auditJson(e.args)}::jsonb`,
     outcome: e.outcome,
     approvalId: e.approvalId ?? null,
     idempotencyKey: e.idempotencyKey ?? null,

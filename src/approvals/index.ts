@@ -1,15 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { sql, eq } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { argsHash } from '../db/args-hash.js';
-import * as s from '../db/schema.js';
+import { inAppTx, queryRows } from '../db/index.js';
 import { type ApprovalsConfig, defaultApprovalsConfig } from './config.js';
 import { jsonbSafeString, jsonSafe, LONE_SURROGATE, toJsonb, writeAudit } from './audit.js';
 import { issueRefund } from './refund.js';
 import type {
   Approval, Caller, Role, ExecuteResult, HandlerMap, RequestWriteResult, ResolveResult, WriteTool,
 } from './types.js';
-import type { AppDb, AppTx } from '../db/types.js';
+import type { AppDb, AppQueryable } from '../db/types.js';
 
 export * from './types.js';
 export { type ApprovalsConfig, defaultApprovalsConfig, loadApprovalsConfig } from './config.js';
@@ -50,10 +50,8 @@ const callerIssue = { code: 'custom', path: ['caller'], message: 'invalid caller
 const lookupHandler = (handlers: HandlerMap, tool: unknown) =>
   typeof tool === 'string' && Object.hasOwn(handlers, tool) ? handlers[tool as WriteTool] : undefined;
 
-const getApproval = async (db: AppDb | AppTx, id: string) => {
-  const r = await (db as AppDb).execute(sql`select * from approvals where id = ${id}`);
-  return (r as unknown as { rows: Approval[] }).rows[0];
-};
+const getApproval = async (db: AppQueryable, id: string) =>
+  (await queryRows<Approval>(db, sql`select * from approvals where id = ${id}`))[0];
 
 export async function requestWrite(
   db: AppDb,
@@ -69,7 +67,7 @@ export async function requestWrite(
   const auditKey = typeof rawKey === 'string' && isPgExact(rawKey) && Buffer.byteLength(rawKey, 'utf8') <= MAX_IDEMPOTENCY_KEY_BYTES ? rawKey : null;
   const base = { actor: caller.actor, role: caller.role, tool: typeof req.tool === 'string' ? req.tool.slice(0, 200).replaceAll('\u0000', '\uFFFD') : '[invalid]', args: req.args ?? null, idempotencyKey: auditKey, startedAt, correlationId };
   if (!caller.ok) {
-    await db.transaction((tx) => writeAudit(tx, { ...base, outcome: 'error', errorCode: 'invalid_args' }));
+    await inAppTx(db, (tx) => writeAudit(tx, { ...base, outcome: 'error', errorCode: 'invalid_args' }));
     return { kind: 'invalid_args', issues: [callerIssue] };
   }
   const handler = lookupHandler(handlers, input.tool);
@@ -82,7 +80,7 @@ export async function requestWrite(
   const key: unknown = input.idempotencyKey;
   // Bounded so it always fits the (tool, idempotency_key) unique index.
   if (typeof key !== 'string' || key.trim().length === 0 || !isPgExact(key) || Buffer.byteLength(key, 'utf8') > MAX_IDEMPOTENCY_KEY_BYTES) {
-    await db.transaction((tx) => writeAudit(tx, { ...base, idempotencyKey: null, outcome: 'error', errorCode: 'invalid_args' }));
+    await inAppTx(db, (tx) => writeAudit(tx, { ...base, idempotencyKey: null, outcome: 'error', errorCode: 'invalid_args' }));
     return { kind: 'invalid_args', issues: [{ code: 'custom', path: ['idempotencyKey'], message: `idempotency key must be a non-empty string of at most ${MAX_IDEMPOTENCY_KEY_BYTES} UTF-8 bytes` } as z.core.$ZodIssue] };
   }
   const parsed = handler.schema.safeParse(input.args);
@@ -110,27 +108,21 @@ export async function requestWrite(
     return { kind: 'duplicate', approvalId: row.id, status: row.status, result: row.result };
   };
 
-  const find = async () => {
-    const r = await db.execute(sql`
-      select * from approvals where tool = ${input.tool} and idempotency_key = ${input.idempotencyKey}
-    `);
-    return (r as unknown as { rows: Approval[] }).rows[0];
-  };
+  const find = async () => (await queryRows<Approval>(db,
+    sql`select * from approvals where tool = ${input.tool} and idempotency_key = ${input.idempotencyKey}`))[0];
 
   const existing = await find();
   if (existing) return classify(existing);
 
   const summary = await handler.summarize(db, args);
   // Insert and its audit row commit together; an audit failure rolls the approval back.
-  const created = await db.transaction(async (_tx) => {
-    const tx = _tx as AppTx;
-    const inserted = await (tx as AppDb).execute(sql`
+  const created = await inAppTx(db, async (tx) => {
+    const [row] = await queryRows<Approval>(tx, sql`
       insert into approvals (id, tool, idempotency_key, args_hash, arguments, summary, requested_by)
-      values (${randomUUID()}, ${input.tool}, ${input.idempotencyKey}, ${hash}, ${JSON.stringify(args)}, ${summary}, ${caller.actor})
-      on conflict (tool, idempotency_key) do nothing returning *
-    `) as unknown as { rows: Approval[] };
-    if (inserted.rows[0]) await writeAudit(tx, { ...base, outcome: 'pending_approval', approvalId: inserted.rows[0].id });
-    return inserted.rows[0];
+      values (${randomUUID()}, ${input.tool}, ${input.idempotencyKey}, ${hash}, ${JSON.stringify(args)}::jsonb, ${summary}, ${caller.actor})
+      on conflict (tool, idempotency_key) do nothing returning *`);
+    if (row) await writeAudit(tx, { ...base, outcome: 'pending_approval', approvalId: row.id });
+    return row;
   });
   if (created) return { kind: 'pending', approvalId: created.id, summary, approval: created };
   // Lost a concurrent insert race: classify against the winner.
@@ -176,13 +168,11 @@ async function resolveApprovalWith(config: ApprovalsConfig, db: AppDb, input: Re
   }
   const status = input.decision === 'approve' ? 'approved' : 'denied';
   // Status change and its audit row commit in one transaction.
-  return db.transaction(async (_tx): Promise<ResolveResult> => {
-    const tx = _tx as AppTx;
-    const upd = await (tx as AppDb).execute(sql`
+  return inAppTx(db, async (tx): Promise<ResolveResult> => {
+    const [updated] = await queryRows<Approval>(tx, sql`
       update approvals set status = ${status}, resolved_by = ${caller.actor}, resolved_at = now()
-      where id = ${row.id} and status = 'pending' returning *
-    `) as unknown as { rows: Approval[] };
-    if (!upd.rows[0]) {
+      where id = ${row.id} and status = 'pending' returning *`);
+    if (!updated) {
       const cur = await getApproval(tx, row.id) as Approval;
       await writeAudit(tx, { ...base, outcome: 'error', errorCode: 'not_pending' });
       return { kind: 'invalid_state', status: cur.status };
@@ -213,8 +203,7 @@ export async function executeApproval(
     await writeAudit(db, { actor: caller.actor, role: caller.role, tool: 'execute_approval', args: { approvalId }, outcome: 'error', startedAt, correlationId, errorCode: 'invalid_args' });
     return { kind: 'invalid_args' };
   }
-  return db.transaction(async (_tx): Promise<ExecuteResult> => {
-    const tx = _tx as AppTx;
+  return inAppTx(db, async (tx): Promise<ExecuteResult> => {
     // Audit is written through tx so the business write and its audit row commit or roll back together.
     const finish = async (r: ExecuteResult, row?: Approval): Promise<ExecuteResult> => {
       const outcome = r.kind === 'executed' ? 'ok' : r.kind === 'duplicate' ? 'duplicate' : 'error';
@@ -226,10 +215,8 @@ export async function executeApproval(
       return r;
     };
     // Row lock serializes concurrent executors; the loser sees a non-approved status afterwards.
-    const lockedRes = await (tx as AppDb).execute(sql`
-      select * from approvals where id = ${approvalId} and status = 'approved' for update
-    `) as unknown as { rows: Approval[] };
-    const locked = lockedRes.rows[0];
+    const [locked] = await queryRows<Approval>(tx,
+      sql`select * from approvals where id = ${approvalId} and status = 'approved' for update`);
     if (!locked) {
       const cur = await getApproval(tx, approvalId);
       if (!cur) return finish({ kind: 'not_found' });
@@ -237,26 +224,28 @@ export async function executeApproval(
       return finish({ kind: 'not_approved', status: cur.status }, cur);
     }
     const handler = lookupHandler(handlers, locked.tool);
-    await (tx as AppDb).execute(sql`savepoint exec_tool`);
+    await tx.execute(sql`savepoint exec_tool`);
     let outcome: Awaited<ReturnType<NonNullable<typeof handler>['execute']>>;
     try {
       outcome = handler ? await handler.execute(tx, locked) : { ok: false, error: 'tool_not_supported' };
     } catch (e) {
-      outcome = { ok: false, error: e instanceof Error ? e.message.slice(0, 200) : 'executor_error' };
+      // Drizzle wraps driver errors as "Failed query: <sql> params: <values>"; keep only the driver's message so
+      // statement parameters never land in approvals.result or the audit row.
+      const root = e instanceof Error && e.cause instanceof Error ? e.cause : e;
+      outcome = { ok: false, error: root instanceof Error ? root.message.slice(0, 200) : 'executor_error' };
     }
-    if (!outcome.ok) await (tx as AppDb).execute(sql`rollback to savepoint exec_tool`);
+    if (!outcome.ok) await tx.execute(sql`rollback to savepoint exec_tool`);
     // Handler output is untrusted shape: make it jsonb-safe (bigint, cycles, NUL, lone surrogates) so the
     // status claim and its audit row always commit instead of rolling back and leaving it 'approved'.
     const error = outcome.ok ? '' : jsonbSafeString(typeof outcome.error === 'string' ? outcome.error : String(outcome.error)).slice(0, 200);
     const result = outcome.ok ? jsonSafe(outcome.result) : { error };
-    const claimed = await (tx as AppDb).execute(sql`
+    const [claimed] = await queryRows<Approval>(tx, sql`
       update approvals set status = ${outcome.ok ? 'executed' : 'failed'}, result = ${toJsonb(result)}::jsonb, executed_at = now()
-      where id = ${approvalId} and status = 'approved' returning *
-    `) as unknown as { rows: Approval[] };
-    if (!claimed.rows[0]) throw new Error('approval claim lost despite row lock');
+      where id = ${approvalId} and status = 'approved' returning *`);
+    if (!claimed) throw new Error('approval claim lost despite row lock');
     return outcome.ok
-      ? finish({ kind: 'executed', approvalId, result }, claimed.rows[0])
-      : finish({ kind: 'failed', approvalId, error }, claimed.rows[0]);
+      ? finish({ kind: 'executed', approvalId, result }, claimed)
+      : finish({ kind: 'failed', approvalId, error }, claimed);
   });
 }
 

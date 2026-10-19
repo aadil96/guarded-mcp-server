@@ -1,12 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApprovals, defaultHandlers, type HandlerMap, executeApproval, loadApprovalsConfig, requestWrite, resolveApproval } from '../../src/approvals/index.js';
 import { seed, seedId } from '../../src/db/seed.js';
-import { connectAsApp } from '../../src/db/index.js';
-import type { AppDb } from '../../src/db/types.js';
+import { sql } from 'drizzle-orm';
+import { closeAppDb, connectAsApp, queryRows } from '../../src/db/index.js';
+import { auditEvents } from '../../src/db/schema.js';
+import type { AppDb, AppTx } from '../../src/db/types.js';
 import { freshDb } from '../helpers.js';
 
 let ctx: Awaited<ReturnType<typeof freshDb>>;
-let db: AppDb & { close?: () => Promise<void> };
+let db: AppDb;
 const op = { actor: 'op-1', role: 'operator' as const };
 const admin = { actor: 'admin-1', role: 'admin' as const };
 const reader = { actor: 'reader-1', role: 'reader' as const };
@@ -44,8 +46,7 @@ beforeAll(async () => {
   }
 });
 afterAll(async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  if (typeof (db as any).close === 'function') await (db as any).close();
+  await closeAppDb(db);
   await ctx.client.close();
 });
 
@@ -266,9 +267,10 @@ describe('argument validation and denied replay', () => {
 
 describe('audit', () => {
   it('runs as meridian_app, which cannot UPDATE audit_events', async () => {
-    const who = await ctx.client.query<{ u: string }>('select current_user u');
-    expect(who.rows[0].u).toBe('meridian_app');
-    await expect(ctx.client.query(`update audit_events set outcome = 'ok'`)).rejects.toThrow(/permission denied|append-only/);
+    const [who] = await queryRows<{ u: string }>(db, sql`select current_user u`);
+    expect(who.u).toBe('meridian_app');
+    await expect(db.execute(sql`update audit_events set outcome = 'ok'`))
+      .rejects.toMatchObject({ cause: { message: expect.stringMatching(/permission denied|append-only/) } });
   });
   it('redacts sensitive args and records every outcome', async () => {
     await requestWrite(db, { ...reader, tool: 'issue_refund', args: { ...refundArgs(seedId('invoice:14'), 1), customer_email: 'x@example.test' }, idempotencyKey: 't-audit' });
@@ -278,31 +280,17 @@ describe('audit', () => {
   });
 });
 
-/** Same Db, but any audit insert inside a transaction fails, to prove the business write rolls back with it. */
+/** Same AppDb, but any audit insert inside a transaction fails, to prove the business write rolls back with it. */
 const auditFailing = (inner: AppDb): AppDb => {
-  const wrapped = Object.create(inner);
-  wrapped.transaction = async (fn: (tx: AppDb) => Promise<unknown>) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (inner as any).transaction(async (tx: AppDb) => {
-      const proxy = Object.create(tx);
-      // Intercept INSERTs into audit_events; drizzle .execute(sql`...`) paths contain the table name.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      proxy.execute = async (q: any) => {
-        const text = String(q?.query ?? q);
-        if (/insert into audit_events/i.test(text)) throw new Error('forced audit failure');
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-        return (tx as any).execute(q);
-      };
-      // Intercept builder inserts used by writeAudit(db, ...) in read-path audit.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      proxy.insert = (_table: any) => ({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        values: (_v: any) => { throw new Error('forced audit failure'); },
-      });
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-      return fn(proxy);
-    });
-  };
+  const wrapped = Object.create(inner) as AppDb;
+  wrapped.transaction = ((fn: (tx: AppTx) => Promise<unknown>) => inner.transaction((tx) => {
+    const failing = Object.create(tx) as AppTx;
+    failing.insert = ((table: unknown) => {
+      if (table === auditEvents) throw new Error('forced audit failure');
+      return tx.insert(table as typeof auditEvents);
+    }) as AppTx['insert'];
+    return fn(failing);
+  })) as AppDb['transaction'];
   return wrapped;
 };
 
@@ -602,5 +590,21 @@ describe('runtime input hardening (Codex re-review)', () => {
       if (label === 'result') expect(row.rows[0].result).toMatchObject({ big: '12345678901234567890n', nul: 'a\uFFFDb', lone: 'c\uFFFD', self: '[circular]' });
       else expect(JSON.stringify(row.rows[0].result)).not.toMatch(/\\u0000/);
     }
+  });
+
+  it('a handler query error is stored as the driver message, without the statement or its parameters', async () => {
+    const inv = await sharedInv();
+    const base = defaultHandlers.issue_refund as NonNullable<HandlerMap['issue_refund']>;
+    const handlers: HandlerMap = {
+      issue_refund: { ...base, execute: async (tx) => { await tx.execute(sql`update orders set total_paise = ${987654321}`); return { ok: true, result: {} }; } },
+    };
+    const r = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 114), idempotencyKey: 'driver-error' }, handlers);
+    if (r.kind !== 'pending') throw new Error(r.kind);
+    await resolveApproval(db, { ...admin, approvalId: r.approvalId, decision: 'approve' });
+    const ex = await executeApproval(db, r.approvalId, admin, handlers);
+    if (ex.kind !== 'failed') throw new Error(ex.kind);
+    expect(ex.error).toMatch(/permission denied/);
+    expect(ex.error).not.toMatch(/Failed query|update orders|987654321/);
+    expect((await lastAudit()).error_code).toBe(ex.error);
   });
 });

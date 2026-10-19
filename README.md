@@ -23,7 +23,7 @@ All read tools are annotated `readOnlyHint: true`. Annotations are hints: client
 | `search_orders` | Text search on order number or customer name | parameterized, wildcards matched literally, max 50 |
 | `list_pending_approvals` | Write requests waiting for a human | max 50 |
 
-`pnpm start` needs `DATABASE_URL`. `MCP_ACTOR` (default `local-dev`) and `MCP_ROLE` (`reader` or `operator`) set the audit identity. For a throwaway dev database, `MCP_DEV_PGLITE=1 pnpm start` uses seeded in-memory PGlite instead.
+`pnpm start` needs `DATABASE_URL` and refuses to start without it. Every connection runs as `meridian_app`; if `SET ROLE meridian_app` fails or `current_user` is anything else, the server exits 1. `MCP_ACTOR` (default `local-dev`) and `MCP_ROLE` (`reader` or `operator`) set the audit identity.
 
 ## Non-goals (v1)
 
@@ -42,7 +42,7 @@ pnpm seed
 pnpm test
 ```
 
-`pnpm test` runs against in-memory PGlite. CI also runs the migrations and seed against a real Postgres 16.
+Without `DATABASE_URL`, `pnpm test` uses in-memory PGlite and skips the suites that need separate login roles. With it (as in CI, on real Postgres 16), every suite runs, including the fail-closed tests. `pnpm check:db-access` fails if code outside `src/db/index.ts`, the owner scripts or the test fixture imports a database driver or changes role.
 
 ## Licence
 

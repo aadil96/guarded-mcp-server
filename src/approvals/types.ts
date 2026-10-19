@@ -1,3 +1,4 @@
+import type { AppQueryable, AppTx } from '../db/types.js';
 import type { z } from 'zod';
 
 export type WriteTool = 'issue_refund' | 'update_order_status' | 'create_credit_note' | 'add_customer_note';
@@ -51,7 +52,7 @@ export type HandlerOutcome = { ok: true; result: Record<string, unknown> } | { o
 export type ToolHandler = {
   /** Validated before hashing; the parsed output is what gets hashed and stored. */
   schema: z.ZodType<Record<string, unknown>>;
-  summarize: (db: unknown, args: Record<string, unknown>) => Promise<string>;
-  execute: (tx: unknown, approval: Approval) => Promise<HandlerOutcome>;
+  summarize(db: AppQueryable, args: Record<string, unknown>): Promise<string>;
+  execute(tx: AppTx, approval: Approval): Promise<HandlerOutcome>;
 };
 export type HandlerMap = Partial<Record<WriteTool, ToolHandler>>;

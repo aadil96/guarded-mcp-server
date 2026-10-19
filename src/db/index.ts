@@ -1,58 +1,55 @@
+import type { SQL } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
-import type { AppDb, AppTx } from './types.js';
+import type { AppDb, AppQueryable, AppTx } from './types.js';
 
-const APP_ROLE = 'meridian_app' as const;
-const CLOSE_PROP = Symbol.for('appdb.close');
+export type { AppDb, AppQueryable, AppTx } from './types.js';
 
+export const APP_ROLE = 'meridian_app';
+
+/** Runs before pg-pool hands a client out; a rejection destroys the client, so no query runs as the login user. */
 async function enterAppRole(client: pg.ClientBase) {
   await client.query(`SET ROLE ${APP_ROLE}`);
   const r = await client.query<{ u: string }>('select current_user as u');
-  if (r.rows[0]?.u !== APP_ROLE) {
-    throw new Error(`expected current_user ${APP_ROLE}, got ${r.rows[0]?.u}`);
-  }
+  if (r.rows[0]?.u !== APP_ROLE) throw new Error(`expected current_user ${APP_ROLE}, got ${r.rows[0]?.u}`);
 }
 
-async function verifyAppRole(pool: pg.Pool) {
-  const r = await pool.query<{ u: string }>('select current_user as u');
-  if (r.rows[0]?.u !== APP_ROLE) {
-    throw new Error(`database role check failed: current_user is ${r.rows[0]?.u}`);
-  }
-}
+const pools = new WeakMap<AppDb, pg.Pool>();
 
 /**
- * Open a database handle that always runs as the least-privilege application role.
- * - Fails closed: if SET ROLE is not permitted, no connection is handed out.
- * - Verifies current_user = meridian_app before returning.
- * - Attaches a close() method to the handle for clean shutdown.
+ * The only way to get an AppDb. Every pooled connection runs SET ROLE meridian_app and checks current_user
+ * before use. Fails closed: a missing URL, a refused SET ROLE or a wrong current_user rejects, and the pool
+ * is ended, so no handle exists that could run as the login user.
  */
-export async function connectAsApp(url: string | undefined | null): Promise<AppDb> {
+export async function connectAsApp(url: string | undefined): Promise<AppDb> {
   if (!url) throw new Error('DATABASE_URL is required');
   const pool = new pg.Pool({ connectionString: url, onConnect: enterAppRole });
   try {
-    await verifyAppRole(pool);
+    const r = await pool.query<{ u: string }>('select current_user as u');
+    if (r.rows[0]?.u !== APP_ROLE) throw new Error(`database role check failed: current_user is ${r.rows[0]?.u}`);
   } catch (e) {
-    // Ensure a failing probe never leaves a live pool behind.
     await pool.end().catch(() => {});
-    throw e instanceof Error ? e : new Error(String(e));
+    throw e;
   }
-  const db = drizzle(pool) as AppDb;
-  // Attach a close hook to support clean server shutdown without leaking the Pool.
-  Object.defineProperty(db, CLOSE_PROP, {
-    value: async () => { await pool.end().catch(() => {}); },
-    enumerable: false,
-    configurable: false,
-    writable: false,
-  });
-  // Also provide a conventional close() for callers that check for it.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (db as any).close = async () => { await pool.end().catch(() => {}); };
+  const db = drizzle(pool) as unknown as AppDb;
+  pools.set(db, pool);
   return db;
 }
 
-// Utility to brand transaction handles inside drizzle's transaction callback.
-export const brandTx = (tx: unknown) => tx as AppTx;
+/** Ends the pool behind an AppDb from connectAsApp. A no-op for handles it did not create. */
+export async function closeAppDb(db: AppDb): Promise<void> {
+  const pool = pools.get(db);
+  pools.delete(db);
+  await pool?.end();
+}
 
-// Expose the symbol so internal code can discover and call the attached close hook if needed.
-export const APP_DB_CLOSE_SYMBOL = CLOSE_PROP;
+/** Opens a transaction whose handle is branded AppTx, the type audit writes require. */
+export function inAppTx<T>(db: AppDb, fn: (tx: AppTx) => Promise<T>): Promise<T> {
+  return db.transaction((tx) => fn(tx as unknown as AppTx));
+}
 
+/** Runs raw SQL and returns its rows. Both pg and PGlite results carry `rows`. */
+export async function queryRows<T>(db: AppQueryable, q: SQL): Promise<T[]> {
+  const r = (await db.execute(q)) as unknown as { rows: T[] };
+  return r.rows;
+}
