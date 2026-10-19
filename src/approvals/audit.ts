@@ -24,7 +24,10 @@ function walk(value: unknown, depth: number, w: Walk): unknown {
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
   if (typeof value === 'bigint') return `${value.toString()}n`;
-  if (typeof value === 'string') return value.length > 200 ? `${value.slice(0, 200)}…` : value;
+  if (typeof value === 'string') {
+    const v = value.replaceAll('\u0000', '\uFFFD'); // jsonb rejects U+0000
+    return v.length > 200 ? `${v.slice(0, 200)}…` : v;
+  }
   if (typeof value === 'undefined') return null;
   if (typeof value !== 'object') return `[${typeof value}]`;
   if (w.path.has(value)) return '[circular]';
@@ -38,7 +41,7 @@ function walk(value: unknown, depth: number, w: Walk): unknown {
       if (w.budget <= 0) { out['…'] = '[truncated]'; break; }
       let v: unknown;
       try { v = (value as Record<string, unknown>)[k]; } catch { v = '[unreadable]'; }
-      out[k] = SENSITIVE.test(k) ? '[redacted]' : walk(v, depth + 1, w);
+      out[k.replaceAll('\u0000', '\uFFFD')] = SENSITIVE.test(k) ? '[redacted]' : walk(v, depth + 1, w);
     }
     return out;
   } finally {

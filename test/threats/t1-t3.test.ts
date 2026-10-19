@@ -476,4 +476,24 @@ describe('runtime input hardening (Codex re-review)', () => {
     expect(Object.hasOwn(a.rows[0].arguments, '__proto__')).toBe(true);
     expect(JSON.stringify(a.rows[0].arguments)).toContain('"hidden":"payload"');
   });
+
+  it('NUL characters in actor, correlationId, key, tool or args are audited rejections, never a thrown insert', async () => {
+    const inv = await sharedInv();
+    const p = await requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 106), idempotencyKey: 'nul-target' });
+    if (p.kind !== 'pending') throw new Error(p.kind);
+    const cases: [() => Promise<{ kind: string }>, string][] = [
+      [() => requestWrite(db, { actor: 'a\u0000b', role: 'operator', tool: 'issue_refund', args: refundArgs(inv.id, 107), idempotencyKey: 'nul-actor' }), 'invalid_args'],
+      [() => requestWrite(db, { ...op, correlationId: 'c\u0000', tool: 'issue_refund', args: refundArgs(inv.id, 107), idempotencyKey: 'nul-corr' }), 'invalid_args'],
+      [() => resolveApproval(db, { actor: 'a\u0000', role: 'admin', approvalId: p.approvalId, decision: 'approve' }), 'invalid_args'],
+      [() => executeApproval(db, p.approvalId, { actor: 'a\u0000', role: 'admin' }), 'invalid_args'],
+      [() => requestWrite(db, { ...op, tool: 'issue_refund', args: refundArgs(inv.id, 107), idempotencyKey: 'k\u0000' }), 'invalid_args'],
+      [() => requestWrite(db, { ...op, tool: 'issue_\u0000refund' as never, args: {}, idempotencyKey: 'nul-tool' }), 'denied'],
+      [() => requestWrite(db, { ...op, tool: 'issue_refund', args: { ...refundArgs(inv.id, 107), reason: 'r\u0000' }, idempotencyKey: 'nul-reason' }), 'invalid_args'],
+    ];
+    for (const [call, kind] of cases) {
+      const auditBefore = await n('audit_events');
+      expect((await call()).kind).toBe(kind);
+      expect(await n('audit_events')).toBe(auditBefore + 1);
+    }
+  });
 });

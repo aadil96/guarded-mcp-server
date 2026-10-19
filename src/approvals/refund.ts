@@ -16,7 +16,7 @@ export function formatInr(paise: number | bigint): string {
 export const issueRefundSchema = z.strictObject({
   invoice_id: z.guid(),
   amount_paise: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  reason: z.string().trim().min(1).max(500),
+  reason: z.string().trim().min(1).max(500).refine((v) => !v.includes('\u0000'), 'reason must not contain NUL'),
 });
 
 function parse(args: Record<string, unknown>) {
