@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { jsonbSafeString } from '../approvals/audit.js';
+import { redact as boundedRedact, jsonbSafeString } from '../approvals/audit.js';
 import { auditEvents } from '../db/schema.js';
 import type { Db } from '../db/types.js';
 
@@ -13,18 +13,17 @@ export function callerFromEnv(env: NodeJS.ProcessEnv = process.env): Caller {
 const SECRET_KEY = /token|secret|password|passwd|api[_-]?key|authorization|cookie/i;
 
 /**
- * Copy of the arguments with secret-looking keys replaced, recursively. Strings and keys are made
- * jsonb-safe (U+0000 and unpaired surrogates -> U+FFFD) so the audit insert itself can't be rejected.
+ * Copy of the arguments with secret-looking keys replaced. Uses the bounded, jsonb-safe walk shared
+ * with the approvals audit (depth, width and total-node caps; NUL/unpaired surrogates -> U+FFFD), so
+ * deeply nested or malformed input can neither overflow the stack nor make the insert fail.
  */
 export function redact(value: unknown): unknown {
-  if (typeof value === 'string') return jsonbSafeString(value);
-  if (Array.isArray(value)) return value.map(redact);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [jsonbSafeString(k), SECRET_KEY.test(k) ? '[redacted]' : redact(v)]),
-    );
+  // Round-trip to plain objects: the walk builds null-prototype objects, which Drizzle's jsonb mapper can't take.
+  try {
+    return JSON.parse(JSON.stringify(boundedRedact(value, SECRET_KEY)) ?? 'null');
+  } catch {
+    return '[unserializable]';
   }
-  return value;
 }
 
 export type AuditEntry = {

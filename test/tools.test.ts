@@ -191,9 +191,17 @@ describe('MCP server over in-memory transport', () => {
     )).rows;
     expect(nulRows).toEqual([{ arguments: { order_id: seedId('order:1'), nul_note: 'a\uFFFDb', ['k\uFFFD']: 'c\uFFFD' }, outcome: 'error', error_code: 'invalid_args' }]);
 
+    // Deeply nested unexpected argument: the bounded redactor must not overflow the stack; one row is still written.
+    let deep: unknown = 'leaf';
+    for (let i = 0; i < 5000; i++) deep = [deep];
+    const nested = await rpc('tools/call', { name: 'get_order', arguments: { order_id: seedId('order:1'), deep_note: deep } });
+    expect(nested.result?.isError).toBe(true);
+    expect(await auditCount()).toBe(before + 6);
+    expect((await ctx.client.query(`select 1 from audit_events where tool = 'get_order' and arguments ? 'deep_note'`)).rows).toHaveLength(1);
+
     // tools/list is not a tool call and writes nothing; schemas advertise no extra keys.
     const listed = await rpc('tools/list', {});
-    expect(await auditCount()).toBe(before + 5);
+    expect(await auditCount()).toBe(before + 6);
     for (const t of (listed.result?.tools ?? []) as { inputSchema: { additionalProperties?: unknown } }[]) {
       expect(t.inputSchema.additionalProperties).toBe(false);
     }
