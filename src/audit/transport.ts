@@ -27,7 +27,12 @@ function isRejection(m: JSONRPCMessage): boolean {
  * Wraps a transport so a tools/call that the SDK rejects before the handler runs still writes
  * exactly one audit row (outcome error, error_code invalid_args). Keyed by JSON-RPC request id.
  */
-export function auditingTransport(inner: Transport, db: Db, caller: Caller, tracker: AuditTracker): Transport {
+export function auditingTransport(
+  inner: Transport, db: Db, caller: Caller, tracker: AuditTracker,
+  /** Runs once when the connection closes (stdin EOF or close()), e.g. to end the DB pool so the process can exit. */
+  onClosed?: () => void | Promise<void>,
+): Transport {
+  let closed = false;
   const pending = new Map<Id, Pending>();
   const wrapper: Transport = {
     start: () => inner.start(),
@@ -59,7 +64,12 @@ export function auditingTransport(inner: Transport, db: Db, caller: Caller, trac
     }
     wrapper.onmessage?.(message, extra);
   };
-  inner.onclose = () => wrapper.onclose?.();
+  inner.onclose = () => {
+    wrapper.onclose?.();
+    if (closed) return;
+    closed = true;
+    Promise.resolve().then(onClosed).catch((e) => console.error('close hook failed:', e));
+  };
   inner.onerror = (e) => wrapper.onerror?.(e);
   return wrapper;
 }
