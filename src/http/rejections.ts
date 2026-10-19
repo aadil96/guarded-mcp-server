@@ -18,13 +18,16 @@ export type RejectionLimits = {
   burst: number;
   /** Tokens refilled per second, per IP. */
   refillPerSecond: number;
-  /** Most IPs tracked at once; the oldest is forgotten first. */
+  /** Most IPs tracked at once. Beyond this, new IPs share one overflow bucket until an old bucket has fully refilled. */
   maxTrackedIps: number;
 };
 
 export const defaultRejectionLimits: RejectionLimits = { burst: 10, refillPerSecond: 10 / 60, maxTrackedIps: 10_000 };
 
 const OTHER = '(other)';
+const EVICTION_SCAN = 64;
+
+type Bucket = { tokens: number; at: number };
 
 /**
  * Audits HTTP requests refused before any tool runs (bad token, Host, Origin, oversized body). Each row is
@@ -33,7 +36,8 @@ const OTHER = '(other)';
  * summary row (error_code rejections_dropped) per flush. No header values are recorded, so no token material.
  */
 export class RejectionAuditor {
-  private readonly buckets = new Map<string, { tokens: number; at: number }>();
+  private readonly buckets = new Map<string, Bucket>();
+  private readonly overflow: Bucket;
   private dropped = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | undefined;
 
@@ -41,24 +45,55 @@ export class RejectionAuditor {
     private readonly db: AppDb,
     private readonly limits: RejectionLimits = defaultRejectionLimits,
     private readonly now: () => number = () => Date.now(),
-  ) {}
+  ) {
+    this.overflow = { tokens: limits.burst, at: now() };
+  }
 
   startPeriodicFlush(intervalMs = 60_000) {
     this.timer ??= setInterval(() => { void this.flush().catch((e) => console.error('rejection summary audit failed:', (e as Error).message)); }, intervalMs);
     this.timer.unref();
   }
 
-  private take(ip: string): boolean {
-    const t = this.now();
-    let b = this.buckets.get(ip);
-    if (b) this.buckets.delete(ip);
-    else {
-      if (this.buckets.size >= this.limits.maxTrackedIps) this.buckets.delete(this.buckets.keys().next().value as string);
-      b = { tokens: this.limits.burst, at: t };
-    }
+  private refill(b: Bucket, t: number) {
     b.tokens = Math.min(this.limits.burst, b.tokens + ((t - b.at) / 1000) * this.limits.refillPerSecond);
     b.at = t;
-    this.buckets.set(ip, b);
+  }
+
+  /**
+   * The bucket for this IP. Past maxTrackedIps, a new IP may only displace one of the oldest buckets that has
+   * fully refilled (forgetting it loses nothing); otherwise it shares the overflow bucket, so rotating source
+   * addresses can't reset their allowance.
+   */
+  private bucketFor(ip: string, t: number): Bucket {
+    const known = this.buckets.get(ip);
+    if (known) {
+      this.buckets.delete(ip);
+      this.buckets.set(ip, known);
+      return known;
+    }
+    if (this.buckets.size >= this.limits.maxTrackedIps) {
+      let scanned = 0;
+      let room = false;
+      for (const [key, b] of this.buckets) {
+        this.refill(b, t);
+        if (b.tokens >= this.limits.burst) {
+          this.buckets.delete(key);
+          room = true;
+          break;
+        }
+        if (++scanned >= EVICTION_SCAN) break;
+      }
+      if (!room) return this.overflow;
+    }
+    const fresh = { tokens: this.limits.burst, at: t };
+    this.buckets.set(ip, fresh);
+    return fresh;
+  }
+
+  private take(ip: string): boolean {
+    const t = this.now();
+    const b = this.bucketFor(ip, t);
+    this.refill(b, t);
     if (b.tokens < 1) return false;
     b.tokens -= 1;
     return true;

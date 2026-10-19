@@ -215,16 +215,40 @@ describe('HTTP transport: bounded rejection audit', () => {
 });
 
 describe('HTTP transport: rejection limiter memory', () => {
-  it('tracks at most maxTrackedIps buckets, forgetting the least recently seen IP first', async () => {
+  it('tracks at most maxTrackedIps buckets; new IPs past the cap share one overflow bucket instead of evicting', async () => {
     const auditor = new RejectionAuditor(db, { burst: 1, refillPerSecond: 0, maxTrackedIps: 2 }, () => 0);
     const hit = (ip: string) => auditor.record({ ip, status: 401, errorCode: 'invalid_token', method: 'POST' });
     expect(await hit('10.0.0.1')).toBe(true);
     expect(await hit('10.0.0.1')).toBe(false);
     expect(await hit('10.0.0.2')).toBe(true);
-    expect(await hit('10.0.0.1')).toBe(false);
     expect(await hit('10.0.0.3')).toBe(true);
+    expect(await hit('10.0.0.4')).toBe(false);
     expect(await hit('10.0.0.1')).toBe(false);
-    expect(await hit('10.0.0.2')).toBe(true);
+    expect(await hit('10.0.0.2')).toBe(false);
+    await auditor.close();
+  });
+
+  it('a round-robin flood from more IPs than are tracked still writes a bounded number of rows', async () => {
+    const auditor = new RejectionAuditor(db, { burst: 1, refillPerSecond: 0, maxTrackedIps: 3 }, () => 0);
+    let written = 0;
+    for (let round = 0; round < 5; round++) {
+      for (let i = 0; i < 10; i++) if (await auditor.record({ ip: `10.1.0.${i}`, status: 401, errorCode: 'invalid_token', method: 'POST' })) written++;
+    }
+    expect(written).toBe(4);
+    expect(await auditor.flush()).toBe(46);
+    await auditor.close();
+  });
+
+  it('forgets a fully refilled bucket to make room, since a fresh one would be the same', async () => {
+    let t = 0;
+    const auditor = new RejectionAuditor(db, { burst: 1, refillPerSecond: 1, maxTrackedIps: 1 }, () => t);
+    const hit = (ip: string) => auditor.record({ ip, status: 401, errorCode: 'invalid_token', method: 'POST' });
+    expect(await hit('10.2.0.1')).toBe(true);
+    expect(await hit('10.2.0.2')).toBe(true);
+    expect(await hit('10.2.0.3')).toBe(false);
+    t = 2000;
+    expect(await hit('10.2.0.3')).toBe(true);
+    expect(await hit('10.2.0.3')).toBe(false);
     await auditor.close();
   });
 
