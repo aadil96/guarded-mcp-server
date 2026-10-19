@@ -16,7 +16,16 @@ const LEGACY_API = /(?:\.\s*(?:tool|prompt|resource)\s*\(|\[\s*['"`](?:tool|prom
 // Raw method names a hand-written handler would match on.
 const RAW_METHOD = /['"`]tools\/(?:call|list)['"`]/;
 // A second server instance, or the low-level Server class, would bypass the framework entirely.
-const SERVER_CTOR = /\bnew\s+(?:McpServer|Server)\b|\b(?:Server|McpServer)\s*\.\s*(?:prototype|call|apply)\b|\bimport\s*\{[^}]*\bServer\b[^}]*\}\s*from\s*['"`]@modelcontextprotocol\//;
+const SERVER_CTOR = new RegExp([
+  /\bnew\s+(?:[\w$]+\s*\.\s*)*(?:McpServer|Server)\b/.source,
+  /\b(?:Server|McpServer)\s*\.\s*(?:prototype|call|apply)\b/.source,
+  // Value imports of the server classes from any SDK entry point, aliased or not (`import type` is fine).
+  /\bimport\s+(?!type\b)(?:[\w$]+\s*,\s*)?\{[^}]*?(?<!\btype\s+)\b(?:Mcp)?Server\b[^}]*\}\s*from\s*['"`]@modelcontextprotocol\//.source,
+  // Namespace, default, dynamic and require imports of the server entry point, which expose the classes under any name.
+  /\bimport\s+(?!type\b)(?:[\w$]+\s*,\s*)?\*\s*as\s+[\w$]+\s+from\s*['"`]@modelcontextprotocol\/(?:server|sdk)/.source,
+  /\bimport\s+(?!type\b)[\w$]+\s+from\s*['"`]@modelcontextprotocol\/(?:server|sdk)/.source,
+  /\b(?:import|require)\s*\(\s*['"`]@modelcontextprotocol\/(?:server|sdk)/.source,
+].join('|'));
 
 const RULES = [
   { re: REGISTER_API, allow: new Set(['src/tools/framework.ts']), msg: 'uses an MCP registration API; define tools with defineReadTool/defineWriteTool' },

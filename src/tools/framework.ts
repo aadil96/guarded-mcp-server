@@ -98,14 +98,16 @@ export function defineReadTool<S extends ToolInput>(spec: ReadToolSpec<S>): Defi
       const parsed = spec.input.safeParse(raw ?? {});
       if (!parsed.success) {
         await inAppTx(db, (tx) => audit(tx, raw, 'invalid_args'));
-        return text({ error: 'invalid_args', message: 'invalid arguments', issues: parsed.error.issues, correlationId }, true);
+        return text({ error: 'invalid_args', message: 'invalid arguments', issues: publicIssues(parsed.error.issues), correlationId }, true);
       }
       return inAppTx(db, async (tx) => {
         try {
           // A savepoint, so a failed query doesn't abort the transaction the audit row is written in.
           const data = await tx.transaction((inner) => spec.run(inner as unknown as AppTx, parsed.data));
+          // Serialise first: a value JSON can't encode (bigint, cycle) must fail before the success audit is written.
+          const result = text(data);
           await audit(tx, parsed.data, null);
-          return text(data);
+          return result;
         } catch (e) {
           const known = e instanceof ToolError;
           if (!known) console.error(`[${correlationId}]`, e);
@@ -115,6 +117,11 @@ export function defineReadTool<S extends ToolInput>(spec: ReadToolSpec<S>): Defi
       });
     },
   });
+}
+
+/** Path, code and message only: never echo input values, which may be sensitive. */
+function publicIssues(issues: readonly { code: string; path: readonly PropertyKey[]; message: string }[]) {
+  return issues.map((i) => ({ code: i.code, path: i.path.map((k) => (typeof k === 'symbol' ? String(k) : k)), message: i.message }));
 }
 
 export const IDEMPOTENCY_KEY = 'idempotency_key';
@@ -148,7 +155,7 @@ export function mapRequestWriteResult(r: RequestWriteResult): CallToolResult {
       return text({ error: 'denied', reason: r.reason }, true);
     case 'invalid_args':
       // Path, code and message only: never echo input values, which may be sensitive.
-      return text({ error: 'invalid_args', issues: r.issues.map((i) => ({ code: i.code, path: i.path, message: i.message })) }, true);
+      return text({ error: 'invalid_args', issues: publicIssues(r.issues) }, true);
     default:
       return assertNever(r);
   }
@@ -179,7 +186,19 @@ export function defineWriteTool<S extends ToolInput>(spec: WriteToolSpec<S>): De
     async call({ db, caller }: Deps, raw: unknown) {
       const { [IDEMPOTENCY_KEY]: key, ...args } = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
       // requestWrite parses args strictly, checks the key and writes exactly one audit row in a transaction.
-      const r = await requestWrite(db, { ...caller, tool: spec.name, args, idempotencyKey: key as string }, { [spec.name]: handler });
+      const startedAt = performance.now();
+      let r: RequestWriteResult;
+      try {
+        r = await requestWrite(db, { ...caller, tool: spec.name, args, idempotencyKey: key as string }, { [spec.name]: handler });
+      } catch (e) {
+        // requestWrite rolled back (e.g. summarize threw), so nothing was audited: record the failure in a fresh transaction.
+        const correlationId = randomUUID();
+        console.error(`[${correlationId}]`, e);
+        await inAppTx(db, (tx) => writeAudit(tx, {
+          actor: caller.actor, role: caller.role, tool: spec.name, args, outcome: 'error', startedAt, correlationId, errorCode: 'internal_error',
+        }));
+        return text({ error: 'internal_error', message: 'internal error', correlationId }, true);
+      }
       return mapRequestWriteResult(r);
     },
   });

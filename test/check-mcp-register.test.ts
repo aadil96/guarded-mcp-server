@@ -56,6 +56,15 @@ describe('check-mcp-register', () => {
     expect(check({ 'src/x.ts': `if (msg.method === 'tools/call') run(msg);` }).out).toContain('handles a raw tools/* method');
     expect(check({ 'src/x.ts': `const s = new McpServer({ name: 'x', version: '0' });` }).out).toContain('constructs an MCP server');
     expect(check({ 'src/x.ts': `import { Server } from '@modelcontextprotocol/server';` }).out).toContain('constructs an MCP server');
+    for (const src of [
+      `import { McpServer as RenamedServer } from '@modelcontextprotocol/server';\nnew RenamedServer({ name: 'x', version: '0' });`,
+      `import { z, McpServer as S } from '@modelcontextprotocol/server';`,
+      `import * as sdk from '@modelcontextprotocol/server';\nnew sdk.McpServer({ name: 'x', version: '0' });`,
+      `const { McpServer: M } = await import('@modelcontextprotocol/server');`,
+      `const sdk = require('@modelcontextprotocol/server');`,
+    ]) expect(check({ 'src/x.ts': src }).out, src).toContain('constructs an MCP server');
+    // Type-only imports construct nothing.
+    expect(check({ 'src/x.ts': `import type { McpServer } from '@modelcontextprotocol/server';\nimport { type McpServer as T } from '@modelcontextprotocol/server';` }).code).toBe(0);
     expect(check({ 'scripts/x.ts': `server.registerTool('x', {}, h);` }).code).toBe(1);
   });
 

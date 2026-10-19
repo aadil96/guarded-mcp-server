@@ -8,6 +8,7 @@ import { seed } from '../src/db/seed.js';
 import type { AppDb } from '../src/db/types.js';
 import { createServer, serverTools } from '../src/server.js';
 import { approvalHandlers, assertStrict, defineReadTool, defineWriteTool, mapRequestWriteResult } from '../src/tools/framework.js';
+import { issueRefund, issueRefundSchema } from '../src/approvals/refund.js';
 import { refundTool } from './fixtures/write-tools.js';
 import { freshDb, mcpClient } from './helpers.js';
 
@@ -152,6 +153,25 @@ describe('defineWriteTool over MCP on the approvals module', () => {
     } finally { await reader.close(); }
   });
 
+  it('a summarize that throws is still audited (internal_error) and creates no approval', async () => {
+    const broken = defineWriteTool({
+      name: 'issue_refund', description: 'x', input: issueRefundSchema,
+      summarize: async () => { throw new Error('lookup failed'); },
+      execute: (tx, _a, approval) => issueRefund.execute(tx, approval),
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const c = await mcpClient(db, op, [broken]);
+    try {
+      const approvals = async () => (await ctx.client.query<{ n: number }>('select count(*)::int n from approvals')).rows[0].n;
+      const before = await approvals();
+      const r = await step(() => c.call('issue_refund', args(100, 'mcp-summarize-throws')));
+      expect(r).toMatchObject({ isError: true, data: { error: 'internal_error', correlationId: expect.any(String) } });
+      expect(await approvals()).toBe(before);
+      const rows = (await ctx.client.query<{ tool: string; error_code: string }>('select tool, error_code from audit_events where correlation_id = $1', [r.data.correlationId])).rows;
+      expect(rows).toEqual([{ tool: 'issue_refund', error_code: 'internal_error' }]);
+    } finally { vi.restoreAllMocks(); await c.close(); }
+  });
+
   it('invalid_args: isError with the zod issues when the framework rejects', async () => {
     // Over 200 UTF-8 bytes but under 200 chars, so the SDK schema passes and the approvals module rejects.
     const r = await step(() => cli.call('issue_refund', args(100, 'é'.repeat(150))));
@@ -160,7 +180,7 @@ describe('defineWriteTool over MCP on the approvals module', () => {
 });
 
 describe('read tool failures are audited in the same transaction', () => {
-  it('a query PostgreSQL rejects still writes one audit row (internal_error) and returns an error result', async () => {
+  it('a query PostgreSQL rejects, or a result JSON cannot encode, writes exactly one audit row (internal_error)', async () => {
     const ctx = await freshDb();
     let db: AppDb;
     if (ctx.url) db = await connectAsApp(ctx.url);
@@ -173,6 +193,14 @@ describe('read tool failures are audited in the same transaction', () => {
       expect(r).toMatchObject({ isError: true, data: { error: 'internal_error' } });
       const rows = (await ctx.client.query<{ tool: string; error_code: string }>('select tool, error_code from audit_events')).rows;
       expect(rows).toEqual([{ tool: 'boom', error_code: 'internal_error' }]);
+      // A result JSON can't encode fails before the success audit, so the log holds one row, not ok + error.
+      const big = defineReadTool({ name: 'big', description: 'returns a bigint', input: z.strictObject({}), run: async () => ({ n: 1n }) });
+      const c2 = await mcpClient(db, { actor: 'r', role: 'reader' }, [big]);
+      try {
+        expect(await c2.call('big', {})).toMatchObject({ isError: true, data: { error: 'internal_error' } });
+      } finally { await c2.close(); }
+      const bigRows = (await ctx.client.query<{ tool: string; error_code: string | null }>(`select tool, error_code from audit_events where tool = 'big'`)).rows;
+      expect(bigRows).toEqual([{ tool: 'big', error_code: 'internal_error' }]);
     } finally {
       vi.restoreAllMocks();
       await cli.close();
