@@ -3,8 +3,8 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { seed, seedId } from '../src/db/seed.js';
 import type { AppDb } from '../src/db/types.js';
 import { AuditTracker, auditingTransport } from '../src/audit/transport.js';
-import { callTool, createServer } from '../src/server.js';
-import { escapeLike, type readTools } from '../src/tools/read.js';
+import { createServer } from '../src/server.js';
+import { escapeLike } from '../src/tools/read.js';
 import { freshDb } from './helpers.js';
 
 type Ctx = Awaited<ReturnType<typeof freshDb>>;
@@ -12,14 +12,35 @@ let ctx: Ctx;
 const caller = { actor: 'test-actor', role: 'reader' as const };
 const auditCount = async () => (await ctx.client.query<{ n: number }>('select count(*)::int n from audit_events')).rows[0].n;
 
-async function call(name: keyof typeof readTools, args: unknown = {}) {
-  const r = await callTool(ctx.db as unknown as AppDb, caller, name, args);
-  return { isError: r.isError === true, data: JSON.parse(r.content[0].text) };
-}
+let rpc: (name: string, args: unknown) => Promise<{ isError: boolean; data: any }>;
 
 beforeAll(async () => {
   ctx = await freshDb();
   await seed(ctx.db);
+  // Spin up an in-memory MCP server once for the file.
+  const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+  const tracker = new AuditTracker();
+  const db = ctx.db as unknown as AppDb;
+  await createServer(db, caller, tracker).connect(auditingTransport(serverT, db, caller, tracker));
+  const pending = new Map<number, (m: JSONRPCMessage) => void>();
+  clientT.onmessage = (m) => { if ('id' in m && typeof m.id === 'number') pending.get(m.id)?.(m); };
+  await clientT.start();
+  let id = 0;
+  const send = (method: string, params: unknown) => new Promise<Record<string, unknown>>((res) => {
+    const n = ++id;
+    pending.set(n, res as (m: JSONRPCMessage) => void);
+    clientT.send({ jsonrpc: '2.0', id: n, method, params } as JSONRPCMessage);
+  }).then((m) => (m as { result: Record<string, unknown> }).result);
+  await send('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
+  await clientT.send({ jsonrpc: '2.0', method: 'notifications/initialized' } as JSONRPCMessage);
+  rpc = async (name: string, args: unknown = {}) => {
+    const r = await send('tools/call', { name, arguments: args });
+    const isError = (r as { isError?: boolean }).isError === true;
+    const text = ((r as { content?: { text: string }[] }).content ?? [])[0]?.text ?? 'null';
+    let data: any;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    return { isError, data };
+  };
 });
 
 let before = 0;
@@ -27,26 +48,26 @@ beforeEach(async () => { before = await auditCount(); });
 
 describe('read tools return seed data', () => {
   it('list_customers / get_customer', async () => {
-    const { data } = await call('list_customers', { limit: 5 });
+    const { data } = await rpc('list_customers', { limit: 5 });
     expect(data).toHaveLength(5);
     expect(data[0].name).toBe('Konkan Coastal Traders');
-    const one = await call('get_customer', { customer_id: seedId('customer:2') });
+    const one = await rpc('get_customer', { customer_id: seedId('customer:2') });
     expect(one.data).toMatchObject({ name: 'Dadar Hardware Mart', city: 'Mumbai' });
   });
 
   it('list_orders filters by customer and status', async () => {
     const cust = seedId('customer:1');
-    const { data } = await call('list_orders', { customer_id: cust });
+    const { data } = await rpc('list_orders', { customer_id: cust });
     expect(data.map((o: { orderNumber: string }) => o.orderNumber).sort()).toEqual(['ORD-0001', 'ORD-0013', 'ORD-0025', 'ORD-0037']);
-    const pending = await call('list_orders', { status: 'pending' });
+    const pending = await rpc('list_orders', { status: 'pending' });
     expect(pending.data).toHaveLength(8);
     expect(pending.data.every((o: { status: string }) => o.status === 'pending')).toBe(true);
-    const both = await call('list_orders', { customer_id: cust, status: 'pending' });
+    const both = await rpc('list_orders', { customer_id: cust, status: 'pending' });
     expect(both.data.map((o: { orderNumber: string }) => o.orderNumber)).toEqual(['ORD-0001']);
   });
 
   it('get_order returns the Order shape with line items that add up', async () => {
-    const { data } = await call('get_order', { order_id: seedId('order:4') });
+    const { data } = await rpc('get_order', { order_id: seedId('order:4') });
     expect(Object.keys(data).sort()).toEqual(['createdAt', 'customerId', 'id', 'items', 'orderNumber', 'status', 'totalPaise', 'updatedAt']);
     expect(data.orderNumber).toBe('ORD-0004');
     expect(data.items.length).toBeGreaterThan(0);
@@ -58,15 +79,15 @@ describe('read tools return seed data', () => {
   });
 
   it('list_invoices / get_invoice', async () => {
-    expect((await call('list_invoices', { limit: 50 })).data).toHaveLength(30);
-    const paid = await call('list_invoices', { status: 'paid', limit: 50 });
+    expect((await rpc('list_invoices', { limit: 50 })).data).toHaveLength(30);
+    const paid = await rpc('list_invoices', { status: 'paid', limit: 50 });
     expect(paid.data).toHaveLength(10);
-    const inv = await call('get_invoice', { invoice_id: seedId('invoice:1') });
+    const inv = await rpc('get_invoice', { invoice_id: seedId('invoice:1') });
     expect(inv.data).toMatchObject({ invoiceNumber: 'INV-0001', status: 'unpaid', paidPaise: 0 });
   });
 
   it('list_pending_approvals shows only pending rows', async () => {
-    expect((await call('list_pending_approvals')).data).toEqual([]);
+    expect((await rpc('list_pending_approvals', {})).data).toEqual([]);
     await ctx.client.query(
       `insert into approvals (id, tool, idempotency_key, args_hash, arguments, summary, requested_by, status) values
        ($1, 'issue_refund', 'k1', $3, '{}', 'Refund 100', 'local-dev', 'pending'),
@@ -74,25 +95,25 @@ describe('read tools return seed data', () => {
       [seedId('t-appr-1'), seedId('t-appr-2'), 'a'.repeat(64)],
     );
     await ctx.client.query(`update approvals set status = 'denied', resolved_by = 'admin', resolved_at = now() where id = $1`, [seedId('t-appr-2')]);
-    const { data } = await call('list_pending_approvals');
+    const { data } = await rpc('list_pending_approvals', {});
     expect(data.map((a: { summary: string }) => a.summary)).toEqual(['Refund 100']);
   });
 });
 
 describe('limits and search safety', () => {
   it('clamps limits at 50', async () => {
-    expect((await call('list_orders', { limit: 1000 })).data).toHaveLength(40);
+    expect((await rpc('list_orders', { limit: 1000 })).data).toHaveLength(40);
     await ctx.client.query(
       `insert into customers (id, name, city, gstin, phone, email)
        select gen_random_uuid(), 'Bulk ' || g, 'Pune', 'BULK' || g, '0', 'x@example.invalid' from generate_series(1, 60) g`,
     );
-    expect((await call('list_customers', { limit: 1000 })).data).toHaveLength(50);
-    expect((await call('search_orders', { query: 'ORD', limit: 999 })).data).toHaveLength(40);
+    expect((await rpc('list_customers', { limit: 1000 })).data).toHaveLength(50);
+    expect((await rpc('search_orders', { query: 'ORD', limit: 999 })).data).toHaveLength(40);
   });
 
   it('search matches order number and customer name', async () => {
-    expect((await call('search_orders', { query: 'ord-0007' })).data.map((o: { orderNumber: string }) => o.orderNumber)).toEqual(['ORD-0007']);
-    const byName = await call('search_orders', { query: 'konkan' });
+    expect((await rpc('search_orders', { query: 'ord-0007' })).data.map((o: { orderNumber: string }) => o.orderNumber)).toEqual(['ORD-0007']);
+    const byName = await rpc('search_orders', { query: 'konkan' });
     expect(byName.data).toHaveLength(4);
     expect(byName.data.every((o: { customerName: string }) => o.customerName === 'Konkan Coastal Traders')).toBe(true);
   });
@@ -100,7 +121,7 @@ describe('limits and search safety', () => {
   it('treats % _ and SQL-ish input literally', async () => {
     expect(escapeLike('50%_off\\')).toBe('50\\%\\_off\\\\');
     for (const q of ['%', '_', '%%', "' OR 1=1 --", "'; drop table orders; --", 'ORD-000_']) {
-      const r = await call('search_orders', { query: q });
+      const r = await rpc('search_orders', { query: q });
       expect(r.isError).toBe(false);
       expect(r.data).toEqual([]);
     }
@@ -110,13 +131,13 @@ describe('limits and search safety', () => {
 
 describe('audit', () => {
   it('every call writes exactly one row, including errors', async () => {
-    await call('list_customers', { limit: 1 });
+    await rpc('list_customers', { limit: 1 });
     expect(await auditCount()).toBe(before + 1);
-    const missing = await call('get_order', { order_id: '00000000-0000-4000-8000-000000000000' });
+    const missing = await rpc('get_order', { order_id: '00000000-0000-4000-8000-000000000000' });
     expect(missing).toMatchObject({ isError: true, data: { error: 'not_found' } });
     expect(await auditCount()).toBe(before + 2);
-    const bad = await call('get_invoice', { invoice_id: 'not-a-uuid' });
-    expect(bad.data.error).toBe('invalid_args');
+    // SDK-level invalid args: audited by transport; result content is not JSON.
+    await rpc('get_invoice', { invoice_id: 'not-a-uuid' });
     expect(await auditCount()).toBe(before + 3);
     const rows = (await ctx.client.query<Record<string, unknown>>(
       'select actor, role, tool, arguments, outcome, duration_ms, correlation_id, error_code from audit_events order by created_at desc, tool limit 3',

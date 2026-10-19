@@ -5,10 +5,10 @@ import { callerFromEnv } from '../src/audit/log.js';
 import { closeAppDb, connectAsApp, queryRows } from '../src/db/index.js';
 import { seed, seedId } from '../src/db/seed.js';
 import type { AppDb } from '../src/db/types.js';
-import { callTool, createServer } from '../src/server.js';
+import { createServer } from '../src/server.js';
 import { AuditTracker, auditingTransport } from '../src/audit/transport.js';
 import { InMemoryTransport, type JSONRPCMessage } from '@modelcontextprotocol/server';
-import type { readTools } from '../src/tools/read.js';
+import './tools.test'; // reuse side effects; not importing types
 import { freshDb, startServer } from './helpers.js';
 
 // The server's own db handle: on real PG (CI) the production connectAsApp(); on PGlite the
@@ -40,19 +40,33 @@ describe('server db connection runs as meridian_app', () => {
   });
 
   it('every read tool and its audit insert work under the app role', async () => {
-    const caller = callerFromEnv({});
-    const calls: [keyof typeof readTools, Record<string, unknown>][] = [
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    const tracker = new AuditTracker();
+    await createServer(db, callerFromEnv({}), tracker).connect(auditingTransport(serverT, db, callerFromEnv({}), tracker));
+    const pending = new Map<number, (m: JSONRPCMessage) => void>();
+    clientT.onmessage = (m) => { if ('id' in m && typeof m.id === 'number') pending.get(m.id)?.(m); };
+    await clientT.start();
+    let id = 0;
+    const send = (method: string, params: unknown) => new Promise<Record<string, unknown>>((res) => {
+      const n = ++id; pending.set(n, res as (m: JSONRPCMessage) => void);
+      clientT.send({ jsonrpc: '2.0', id: n, method, params } as JSONRPCMessage);
+    }).then((m) => (m as { result: Record<string, unknown> }).result);
+    await send('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
+    await clientT.send({ jsonrpc: '2.0', method: 'notifications/initialized' } as JSONRPCMessage);
+    const calls: [string, Record<string, unknown>][] = [
       ['list_customers', {}], ['get_customer', { customer_id: seedId('customer:1') }],
       ['list_orders', { status: 'pending' }], ['get_order', { order_id: seedId('order:1') }],
       ['list_invoices', {}], ['get_invoice', { invoice_id: seedId('invoice:1') }],
       ['search_orders', { query: 'ORD-00%' }], ['list_pending_approvals', {}],
     ];
     for (const [name, args] of calls) {
-      const r = await callTool(db, caller, name, args);
-      expect(r.isError, `${name}: ${r.content[0].text}`).not.toBe(true);
+      const r = await send('tools/call', { name, arguments: args });
+      const isError = (r as { isError?: boolean }).isError === true;
+      expect(isError, `${name}: ${JSON.stringify(r)}`).not.toBe(true);
     }
     const n = await run('select count(*)::int as n from audit_events');
     expect((n as unknown as { rows: { n: number }[] }).rows[0].n).toBe(calls.length);
+    await clientT.close();
   });
 
   it('the transport hook audits an SDK-rejected call under the app role, even with a NUL in the tool name', async () => {

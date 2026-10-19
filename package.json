@@ -11,6 +11,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint .",
+    "check:tool-register": "node scripts/check-mcp-register.mjs",
     "check:db-access": "node scripts/check-db-access.mjs",
     "verify:seed": "tsx scripts/verify-seed.ts",
     "start": "tsx src/index.ts",
