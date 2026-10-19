@@ -12,7 +12,8 @@ export function callerFromEnv(env: NodeJS.ProcessEnv = process.env): Caller {
 }
 
 // Redaction and JSON-safety (single canonical implementation)
-const SENSITIVE = /(email|phone|gstin|token|secret|password|api[_-]?key|authorization|cookie)/i;
+// Union of the two matchers this replaced (approvals audit and read-path audit); never drop a key from it.
+const SENSITIVE = /(email|phone|gstin|token|secret|password|passwd|api[_-]?key|authorization|cookie)/i;
 export const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 const jsonbSafe = (s: string) => s.replaceAll('\u0000', '\uFFFD').replace(LONE_SURROGATE, '\uFFFD');
 
