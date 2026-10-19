@@ -7,14 +7,6 @@ export type AuditRole = Role | 'invalid';
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'executed' | 'failed';
 export type AuditOutcome = 'ok' | 'error' | 'denied' | 'pending_approval' | 'duplicate' | 'conflict';
 
-/** Minimal query surface; works over pg, PGlite or a transaction handle. */
-export interface Sql {
-  query<T = Record<string, unknown>>(q: string, params?: unknown[]): Promise<{ rows: T[] }>;
-}
-export interface Db extends Sql {
-  transaction<T>(fn: (tx: Sql) => Promise<T>): Promise<T>;
-}
-
 export type Approval = {
   id: string;
   tool: WriteTool;
@@ -59,7 +51,7 @@ export type HandlerOutcome = { ok: true; result: Record<string, unknown> } | { o
 export type ToolHandler = {
   /** Validated before hashing; the parsed output is what gets hashed and stored. */
   schema: z.ZodType<Record<string, unknown>>;
-  summarize(sql: Sql, args: Record<string, unknown>): Promise<string>;
-  execute(tx: Sql, approval: Approval): Promise<HandlerOutcome>;
+  summarize: (db: unknown, args: Record<string, unknown>) => Promise<string>;
+  execute: (tx: unknown, approval: Approval) => Promise<HandlerOutcome>;
 };
 export type HandlerMap = Partial<Record<WriteTool, ToolHandler>>;

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { redact as boundedRedact, jsonbSafeString } from '../approvals/audit.js';
 import { auditEvents } from '../db/schema.js';
-import type { Db } from '../db/types.js';
+import type { AppDb } from '../db/types.js';
 
 export type Caller = { actor: string; role: 'reader' | 'operator' };
 
@@ -36,7 +36,7 @@ export type AuditEntry = {
 };
 
 /** Appends exactly one audit_events row. App code never updates or deletes these rows. */
-export async function writeAudit(db: Db, caller: Caller, e: AuditEntry) {
+export async function writeAudit(db: AppDb, caller: Caller, e: AuditEntry) {
   await db.insert(auditEvents).values({
     id: randomUUID(),
     actor: caller.actor,
