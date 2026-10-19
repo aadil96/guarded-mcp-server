@@ -4,8 +4,10 @@ import { AuditTracker, auditingTransport } from './audit/transport.js';
 import { loadTokenConfig, type TokenEntry } from './auth/tokens.js';
 import { APP_ROLE, closeAppDb, connectAsApp } from './db/index.js';
 import type { AppDb } from './db/types.js';
-import { startHttpServer } from './http/server.js';
+import { closeDbWithin, startHttpServer } from './http/server.js';
 import { createServer } from './server.js';
+
+const DB_CLOSE_TIMEOUT_MS = 5_000;
 
 // stdout carries the MCP protocol on stdio; log only to stderr.
 const fail = (what: string, e: unknown): never => {
@@ -41,7 +43,14 @@ async function serveHttp() {
   });
   console.error(`guarded-mcp-server: listening on ${srv.url.href} (${tokens.length} token(s))`);
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-    process.once(sig, () => { void srv.close().finally(() => closeAppDb(db)); });
+    process.once(sig, () => {
+      void srv.close().finally(async () => {
+        const result = await closeDbWithin(() => closeAppDb(db), DB_CLOSE_TIMEOUT_MS);
+        if (result === 'closed') return;
+        console.error(`guarded-mcp-server: database pool did not close cleanly (${result}); exiting`);
+        process.exit(1);
+      });
+    });
   }
 }
 

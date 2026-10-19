@@ -154,6 +154,12 @@ describe('HTTP transport: request guards', () => {
     expect((await post({ ...auth, origin: 'https://evil.example' })).status).toBe(403);
     expect(await lastAudit()).toMatchObject({ actor: 'anonymous', error_code: 'forbidden_origin' });
     expect((await post({ ...auth, origin: 'null' })).status).toBe(403);
+    for (const origin of ['https://user@localhost', 'http://u:p@127.0.0.1', 'http://localhost/path', 'http://localhost?q=1', 'http://localhost#f', 'localhost']) {
+      const before = await auditCount();
+      expect((await post({ ...auth, origin })).status, origin).toBe(403);
+      expect(await auditCount()).toBe(before + 1);
+      expect(await lastAudit()).toMatchObject({ error_code: 'forbidden_origin' });
+    }
     expect((await post({ ...auth, origin: `http://localhost:${srv.url.port}` })).status).toBe(200);
     expect((await post({ ...auth, origin: 'https://console.example.test' })).status).toBe(200);
     const rebound = await new Promise<number>((resolve, reject) => {

@@ -13,8 +13,14 @@ import { type Rejection, RejectionAuditor, type RejectionLimits } from './reject
 export const MCP_PATH = '/mcp';
 export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
-/** A bare host or bracketed IPv6 literal with an optional port. Userinfo, paths and the like are refused before the SDK's allowlist check. */
-const HOST_SYNTAX = /^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|[1-9]\d{0,3}|0))?$/;
+const PORT = String.raw`(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|[1-9]\d{0,3}|0))?`;
+const HOSTNAME = String.raw`(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])`;
+/**
+ * Host is a bare host or bracketed IPv6 literal with an optional port; Origin is scheme://host[:port]. The SDK's
+ * validators compare only the parsed hostname, so userinfo, paths, queries and fragments are refused here first.
+ */
+const HOST_SYNTAX = new RegExp(`^${HOSTNAME}${PORT}$`);
+const ORIGIN_SYNTAX = new RegExp(`^[A-Za-z][A-Za-z0-9+.-]*://${HOSTNAME}${PORT}$`);
 
 export type HttpOptions = {
   db: AppDb;
@@ -59,6 +65,19 @@ async function sendResponse(res: ServerResponse, r: Response) {
   res.end(Buffer.from(await r.arrayBuffer()));
 }
 
+/** Ends the pool, but gives up after ms: pool.end() waits for every checked-out client, and a stuck query never returns one. */
+export async function closeDbWithin(close: () => Promise<void>, ms: number): Promise<'closed' | 'timed_out' | 'failed'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      close().then(() => 'closed' as const, () => 'failed' as const),
+      new Promise<'timed_out'>((r) => { timer = setTimeout(() => r('timed_out'), ms); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Streamable HTTP entry. Every request is checked in this order, each failure answered before anything is
  * parsed: path, declared body size (413), Host and Origin (DNS rebinding, 403), bearer token (401), then the
@@ -95,7 +114,8 @@ export function startHttpServer(opts: HttpOptions) {
     if (!HOST_SYNTAX.test(req.headers.host ?? '') || !validateHostHeader(req.headers.host, hosts).ok) {
       return reject(res, { ip, method, status: 403, errorCode: 'invalid_host' }, { error: 'invalid_host' });
     }
-    if (!validateOriginHeader(req.headers.origin, origins).ok) {
+    const origin = req.headers.origin;
+    if ((origin !== undefined && !ORIGIN_SYNTAX.test(origin)) || !validateOriginHeader(origin, origins).ok) {
       return reject(res, { ip, method, status: 403, errorCode: 'forbidden_origin' }, { error: 'forbidden_origin' });
     }
     const auth = authenticate(req.headers.authorization, opts.tokens);
