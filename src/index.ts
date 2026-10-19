@@ -41,7 +41,7 @@ async function serveHttp() {
   });
   console.error(`guarded-mcp-server: listening on ${srv.url.href} (${tokens.length} token(s))`);
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-    process.once(sig, () => { void srv.close().then(() => closeAppDb(db)); });
+    process.once(sig, () => { void srv.close().finally(() => closeAppDb(db)); });
   }
 }
 

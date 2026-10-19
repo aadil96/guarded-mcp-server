@@ -146,7 +146,7 @@ export function startHttpServer(opts: HttpOptions) {
         rejections,
         close: async () => {
           await new Promise<void>((r) => { http.close(() => r()); http.closeAllConnections(); });
-          await rejections.close();
+          await rejections.close().catch((e) => { console.error('final rejection summary audit failed:', (e as Error).message); });
         },
       });
     });

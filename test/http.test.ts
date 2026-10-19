@@ -267,6 +267,21 @@ describe('HTTP transport: rejection limiter memory', () => {
     expect(await lastAudit()).toMatchObject({ error_code: 'rejections_dropped', arguments: { total: 2, byIp: { '10.0.0.4': 2 } } });
     await auditor.close();
   });
+
+  it('server close resolves even if the final rejection summary cannot be written', async () => {
+    let down = false;
+    const flaky = new Proxy(db, {
+      get(t, p) {
+        if (p === 'transaction' && down) return async () => { throw new Error('db down'); };
+        const v = Reflect.get(t, p);
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    const s2 = await startHttpServer({ db: flaky, tokens, rejectionLimits: { burst: 0, refillPerSecond: 0, maxTrackedIps: 10 } });
+    expect((await post({ authorization: 'Bearer nope' }, undefined, s2.url)).status).toBe(401);
+    down = true;
+    await expect(s2.close()).resolves.toBeUndefined();
+  });
 });
 
 describe('HTTP transport: no token material anywhere', () => {
