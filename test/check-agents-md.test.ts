@@ -62,6 +62,15 @@ describe('check-agents-md-enforcers', () => {
     expect(r.out).toMatch(msg);
   });
 
+  it('fails when the separator is missing or malformed, instead of silently dropping the first row', () => {
+    const noSep = check('# Agents\n\n## Rules and enforcers\n\n| Rule | Enforced by |\n| A | `test/gone.test.ts` |\n| B | `test/thing.test.ts` |\n');
+    expect(noSep.code, noSep.out).toBe(1);
+    expect(noSep.out).toMatch(/the line after the header must be the separator/);
+    const bad = check('# Agents\n\n## Rules and enforcers\n\n| Rule | Enforced by |\n| --- | x |\n| B | `test/thing.test.ts` |\n');
+    expect(bad.code, bad.out).toBe(1);
+    expect(bad.out).toMatch(/the line after the header must be the separator/);
+  });
+
   it('fails when the section or its table is missing or empty', () => {
     expect(check('# Agents\n\nNo table.\n').out).toMatch(/no "## Rules and enforcers" section/);
     expect(check(HEAD).out).toMatch(/the table has no rows/);

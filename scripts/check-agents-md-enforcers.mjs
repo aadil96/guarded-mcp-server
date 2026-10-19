@@ -43,7 +43,9 @@ else {
   const table = (end < 0 ? body : body.slice(0, end)).filter((l) => l.trim().startsWith('|'));
   const cells = (l) => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
   if (!table.length || cells(table[0]).join('|') !== 'Rule|Enforced by') errors.push('AGENTS.md: the table header must be "| Rule | Enforced by |"');
-  else {
+  else if (!table[1] || cells(table[1]).length !== 2 || !cells(table[1]).every((c) => /^:?-{3,}:?$/.test(c))) {
+    errors.push('AGENTS.md: the line after the header must be the separator "| --- | --- |"');
+  } else {
     const rows = table.slice(2);
     if (!rows.length) errors.push('AGENTS.md: the table has no rows');
     for (const [i, line] of rows.entries()) {
