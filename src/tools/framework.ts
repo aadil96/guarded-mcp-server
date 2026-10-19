@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { CallToolResult, McpServer, ServerContext } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import { requestWrite } from '../approvals/index.js';
-import type { Approval, HandlerMap, HandlerOutcome, RequestWriteResult, ToolHandler, WriteTool } from '../approvals/types.js';
+import { assertNever } from '../approvals/state.js';
+import type { Approved, HandlerMap, HandlerOutcome, RequestWriteResult, ToolHandler, WriteTool } from '../approvals/types.js';
 import { type Caller, writeAudit } from '../audit/log.js';
 import type { AuditTracker } from '../audit/transport.js';
 import { inAppTx } from '../db/index.js';
@@ -184,13 +185,10 @@ export type WriteToolSpec<S extends ToolInput> = {
   /** Human-readable summary shown to the approver and returned while pending. */
   summarize: (db: AppQueryable, args: z.output<S>) => Promise<string>;
   /** Runs after approval, inside the transaction that claims the approval. */
-  execute: (tx: AppTx, args: z.output<S>, approval: Approval) => Promise<HandlerOutcome>;
+  execute: (tx: AppTx, args: z.output<S>, approval: Approved) => Promise<HandlerOutcome>;
   destructive?: boolean;
 };
 
-function assertNever(x: never): never {
-  throw new Error(`unhandled approvals outcome: ${JSON.stringify(x)}`);
-}
 
 /** Total mapping from the approvals module's result to an MCP tool result. Keeps every field a caller needs. */
 export function mapRequestWriteResult(r: RequestWriteResult): CallToolResult {
@@ -223,7 +221,7 @@ export function defineWriteTool<S extends ToolInput>(spec: WriteToolSpec<S>): De
     summarize: (db: AppQueryable, args: Record<string, unknown>) => spec.summarize(db, args as z.output<S>),
     // approval.arguments is the schema's parsed output, stored by requestWrite; inputs have no transforms
     // (assertStrict), so that output already has the input's shape and is passed through as is.
-    execute: (tx: AppTx, approval: Approval) => spec.execute(tx, approval.arguments as z.output<S>, approval),
+    execute: (tx: AppTx, approval: Approved) => spec.execute(tx, approval.arguments as z.output<S>, approval),
   };
   return Object.freeze({
     [toolBrand]: true as const,

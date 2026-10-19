@@ -6,7 +6,15 @@ An MCP server for a **fake** wholesale business database (Meridian Supply Co.). 
 
 ## Status
 
-Work in progress. The tools run over stdio (`pnpm start`). `issue_refund` only creates a pending approval: there is no shipped way to approve or execute it yet (https://github.com/aadil96/guarded-mcp-server/issues/18), so no money moves.
+Work in progress. The tools run over stdio (`pnpm start`). `issue_refund` only creates a pending approval; a human approves, denies and executes it with the approvals console:
+
+```sh
+APPROVER_ACTOR=alice APPROVER_ROLE=admin pnpm approvals list
+APPROVER_ACTOR=alice APPROVER_ROLE=admin pnpm approvals approve <approval-id>   # or: deny <approval-id>
+APPROVER_ACTOR=alice APPROVER_ROLE=admin pnpm approvals execute <approval-id>
+```
+
+The console's identity comes only from `APPROVER_ACTOR` and `APPROVER_ROLE` (both required; arguments like `--actor` or `--role` are refused and audited). Approving or denying needs `admin` and is refused for the requester (`self_approval_forbidden`); executing needs `operator` or `admin`. Every approve, deny, execute and refusal writes one audit row. The MCP server's caller is never `admin`, so no MCP client can approve.
 
 ## Tools
 

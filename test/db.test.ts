@@ -107,13 +107,13 @@ describe('approvals', () => {
     const { rows } = await insertApproval(`bad-${from}-${to}`);
     const id = (rows[0] as { id: string }).id;
     const path: Record<string, string[]> = { pending: [], approved: ['approved'], denied: ['denied'], executed: ['approved', 'executed'] };
-    for (const st of path[from]) await ctx.client.query(`update approvals set status=$2 where id=$1`, [id, st]);
+    for (const st of path[from]) await ctx.client.query(`update approvals set status=$2, resolved_by=coalesce(resolved_by, 'local-dev') where id=$1`, [id, st]);
     await rejects(`update approvals set status=$2 where id=$1`, [id, to]).toThrow(/invalid approval transition/);
   });
   it('only executes once under a guarded single UPDATE', async () => {
     const { rows } = await insertApproval('race');
     const id = (rows[0] as { id: string }).id;
-    await ctx.client.query(`update approvals set status='approved' where id=$1`, [id]);
+    await ctx.client.query(`update approvals set status='approved', resolved_by='local-dev' where id=$1`, [id]);
     const a = await ctx.client.query(`update approvals set status='executed' where id=$1 and status='approved'`, [id]);
     const b = await ctx.client.query(`update approvals set status='executed' where id=$1 and status='approved'`, [id]);
     expect([a.affectedRows, b.affectedRows]).toEqual([1, 0]);
@@ -125,5 +125,11 @@ describe('approvals', () => {
     ).toThrow(/created as pending/);
     const { rows } = await insertApproval('frozen');
     await rejects(`update approvals set arguments='{"amount_paise":999999}' where id=$1`, [(rows[0] as { id: string }).id]).toThrow(/frozen/);
+  });
+  it('rejects a resolved status without resolved_by, and a result before execution (0004)', async () => {
+    const { rows } = await insertApproval('invariants');
+    const id = (rows[0] as { id: string }).id;
+    await rejects(`update approvals set status='approved' where id=$1`, [id]).toThrow(/approvals_resolved_by_iff_resolved/);
+    await rejects(`update approvals set result='{}' where id=$1`, [id]).toThrow(/approvals_result_only_when_final/);
   });
 });

@@ -15,6 +15,7 @@
     "check:db-access": "node scripts/check-db-access.mjs",
     "verify:seed": "tsx scripts/verify-seed.ts",
     "start": "tsx src/index.ts",
+    "approvals": "tsx scripts/approvals.ts",
     "smoke": "node scripts/smoke-stdio.mjs"
   },
   "dependencies": {

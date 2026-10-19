@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import type { Approval, ToolHandler } from './types.js';
+import type { Approved, ToolHandler } from './types.js';
 import { queryRows } from '../db/index.js';
 import { computeRefundable, paise, paiseToSafeNumber, zInvoiceId } from '../domain/brands.js';
 
@@ -38,7 +38,7 @@ export const issueRefund: ToolHandler = {
     const target = inv?.invoice_number ?? `invoice ${invoiceId}`;
     return refundable === null ? `Refund ${formatInr(amount)} on ${target}` : `Refund ${formatInr(amount)} on ${target}; ${formatInr(refundable)} refundable when requested`;
   },
-  async execute(tx, approval: Approval) {
+  async execute(tx, approval: Approved) {
     const { invoiceId, amount, reason } = parse(approval.arguments);
     // Locks the invoice, so concurrent refunds on it serialize and this check is authoritative.
     const remaining = await computeRefundable(tx, invoiceId, { lock: true });
