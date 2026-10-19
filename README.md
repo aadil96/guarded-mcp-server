@@ -34,6 +34,8 @@ All read tools are annotated `readOnlyHint: true`; `issue_refund` is `destructiv
 
 `pnpm start` needs `DATABASE_URL` and refuses to start without it. Every connection runs as `meridian_app`; if `SET ROLE meridian_app` fails or `current_user` is anything else, the server exits 1. `MCP_ACTOR` (default `local-dev`) and `MCP_ROLE` (`reader` or `operator`) set the audit identity.
 
+The exact `tools/list` result is pinned in `test/snapshots/tools-list.json`, and `pnpm test` fails on any change to it. After an intended tool change, run `pnpm tools:snapshot` and commit the reviewed diff.
+
 ## Non-goals (v1)
 
 - No free-form SQL or reporting-query tool.
@@ -42,6 +44,8 @@ All read tools are annotated `readOnlyHint: true`; `issue_refund` is `destructiv
 - No full OAuth 2.1 in v1. The upgrade path is documented instead.
 
 ## Local dev
+
+Node: any version in `engines.node` (`>=22.12.0 <23`) works locally, and CI runs exactly the version in `.nvmrc` (`nvm use` picks it up). `pnpm check:engines` checks your Node against the range, and CI adds `--exact`.
 
 ```sh
 pnpm install
