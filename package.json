@@ -14,6 +14,9 @@
     "check:tool-register": "node scripts/check-mcp-register.mjs",
     "check:db-access": "node scripts/check-db-access.mjs",
     "verify:seed": "tsx scripts/verify-seed.ts",
+    "tools:list:update": "tsx scripts/update-tools-list-snapshot.ts",
+    "check:engines": "node scripts/check-engines.mjs",
+    "check:agents": "node scripts/check-agents-md-enforcers.mjs",
     "start": "tsx src/index.ts",
     "approvals": "tsx scripts/approvals.ts",
     "smoke": "node scripts/smoke-stdio.mjs"
@@ -41,6 +44,6 @@
   },
   "packageManager": "pnpm@10.34.6",
   "engines": {
-    "node": ">=22.12.0"
+    "node": "22.14.0"
   }
 }
