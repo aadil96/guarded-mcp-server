@@ -1,0 +1,14 @@
+---
+description: Work in pstack style on every task in this repo.
+alwaysApply: true
+---
+
+Use pstack, vendored in `.cursor/skills/`. Its skills don't load on their own, so read each `SKILL.md` yourself when its step comes up.
+
+1. Read `.cursor/skills/poteto-mode/SKILL.md` before anything else and follow it.
+2. Work in pstack's order: types and invariants first, then lint, tests and CI, then minimal prose.
+3. Read `.cursor/skills/architect/SKILL.md` before code that crosses a function boundary.
+4. Use `.cursor/skills/tdd/SKILL.md` for new behaviour and bug fixes: failing test first, then the code.
+5. Follow `.cursor/skills/typescript-best-practices/SKILL.md` for every `.ts` file.
+6. Before declaring done, apply `.cursor/skills/principle-prove-it-works/SKILL.md` against the real artifact (Postgres-backed tests, the running server), and use `.cursor/skills/correct/SKILL.md` to turn any repeated mistake into a type, lint, test or CI check.
+7. Run `.cursor/skills/no-comments/SKILL.md` and `.cursor/skills/unslop/SKILL.md` on the diff and PR text before review.
