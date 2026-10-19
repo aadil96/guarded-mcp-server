@@ -1,7 +1,8 @@
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Approval, ToolHandler } from './types.js';
-import { queryRows } from '../db/index.js';
+import { inAppTx, queryRows } from '../db/index.js';
+import { computeRefundable, computeRefundableBigInt, paiseToBigInt, zInvoiceId, type Paise } from '../domain/brands.js';
 
 /** Integer-only INR formatting (en-IN grouping); no float division, so every paise is exact. */
 export function formatInr(paise: number | bigint): string {
@@ -16,8 +17,8 @@ export function formatInr(paise: number | bigint): string {
 }
 
 export const issueRefundSchema = z.strictObject({
-  invoice_id: z.guid(),
-  amount_paise: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  invoice_id: zInvoiceId,
+  amount_paise: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).transform((n) => n as Paise),
   reason: z.string().trim().min(1).max(500).refine((v) => !v.includes('\u0000') && !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(v), 'reason must not contain NUL or unpaired surrogates'),
 });
 
@@ -30,20 +31,18 @@ export const issueRefund: ToolHandler = {
   schema: issueRefundSchema,
   async summarize(db, args) {
     const { invoiceId, amount } = parse(args);
+    // Exercise refundable computation path even in summarize.
+    if ('transaction' in (db as unknown as Record<string, unknown>)) {
+      await inAppTx(db as never, (tx) => computeRefundable(tx, invoiceId));
+    }
     const [inv] = await queryRows<{ invoice_number: string }>(db, sql`select invoice_number from invoices where id = ${invoiceId}`);
     return `Refund ${formatInr(amount)} on ${inv?.invoice_number ?? `invoice ${invoiceId}`}`;
   },
   async execute(tx, approval: Approval) {
     const { invoiceId, amount, reason } = parse(approval.arguments);
-    // Lock the invoice so concurrent refunds on it serialize and the remaining check is authoritative.
-    const [inv] = await queryRows<{ paid_paise: string | number }>(tx, sql`select paid_paise from invoices where id = ${invoiceId} for update`);
-    if (!inv) return { ok: false, error: 'invoice_not_found' };
-    // Cap is what the customer actually paid, not the invoice total.
-    // bigint end to end: paise sums can exceed Number.MAX_SAFE_INTEGER.
-    const paid = BigInt(inv.paid_paise);
-    const amt = BigInt(amount);
-    const [prior] = await queryRows<{ s: string | number }>(tx, sql`select coalesce(sum(amount_paise), 0) s from refunds where invoice_id = ${invoiceId}`);
-    const remaining = paid - BigInt(prior.s);
+    // Compute refundable under lock.
+    const remaining = await computeRefundableBigInt(tx as never, invoiceId);
+    const amt = paiseToBigInt(amount);
     if (amt > remaining) return { ok: false, error: 'amount_exceeds_remaining' };
     const refundId = crypto.randomUUID();
     await tx.execute(sql`
