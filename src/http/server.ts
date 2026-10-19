@@ -65,8 +65,8 @@ async function sendResponse(res: ServerResponse, r: Response) {
   res.end(Buffer.from(await r.arrayBuffer()));
 }
 
-/** Ends the pool, but gives up after ms: pool.end() waits for every checked-out client, and a stuck query never returns one. */
-export async function closeDbWithin(close: () => Promise<void>, ms: number): Promise<'closed' | 'timed_out' | 'failed'> {
+/** Runs a close step but gives up after ms: pool.end() waits for every checked-out client, and a stuck query never returns one. */
+export async function closeWithin(close: () => Promise<void>, ms: number): Promise<'closed' | 'timed_out' | 'failed'> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([

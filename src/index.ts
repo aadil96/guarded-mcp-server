@@ -4,9 +4,11 @@ import { AuditTracker, auditingTransport } from './audit/transport.js';
 import { loadTokenConfig, type TokenEntry } from './auth/tokens.js';
 import { APP_ROLE, closeAppDb, connectAsApp } from './db/index.js';
 import type { AppDb } from './db/types.js';
-import { closeDbWithin, startHttpServer } from './http/server.js';
+import { closeWithin, startHttpServer } from './http/server.js';
 import { createServer } from './server.js';
 
+// Request grace (10 s), pending refusal audits (2 s) and the final summary all fit inside the server budget.
+const SERVER_CLOSE_TIMEOUT_MS = 15_000;
 const DB_CLOSE_TIMEOUT_MS = 5_000;
 
 // stdout carries the MCP protocol on stdio; log only to stderr.
@@ -44,12 +46,13 @@ async function serveHttp() {
   console.error(`guarded-mcp-server: listening on ${srv.url.href} (${tokens.length} token(s))`);
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     process.once(sig, () => {
-      void srv.close().finally(async () => {
-        const result = await closeDbWithin(() => closeAppDb(db), DB_CLOSE_TIMEOUT_MS);
-        if (result === 'closed') return;
-        console.error(`guarded-mcp-server: database pool did not close cleanly (${result}); exiting`);
+      void (async () => {
+        const server = await closeWithin(srv.close, SERVER_CLOSE_TIMEOUT_MS);
+        const pool = await closeWithin(() => closeAppDb(db), DB_CLOSE_TIMEOUT_MS);
+        if (server === 'closed' && pool === 'closed') return;
+        console.error(`guarded-mcp-server: shutdown did not finish cleanly (server ${server}, pool ${pool}); exiting`);
         process.exit(1);
-      });
+      })();
     });
   }
 }

@@ -41,6 +41,7 @@ export class RejectionAuditor {
   private dropped = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private lastFlush: Promise<unknown> = Promise.resolve();
+  private readonly writing = new Set<Promise<void>>();
 
   constructor(
     private readonly db: AppDb,
@@ -112,15 +113,16 @@ export class RejectionAuditor {
       return false;
     }
     const startedAt = performance.now();
-    try {
-      await inAppTx(this.db, (tx) => writeAudit(tx, {
-        actor: r.caller?.actor ?? 'anonymous', role: r.caller?.role ?? 'invalid', tool: 'http', outcome: 'denied', startedAt,
-        correlationId: randomUUID(), errorCode: r.errorCode, args: { ip: r.ip, status: r.status, method: r.method },
-      }));
-    } catch (e) {
+    const write = inAppTx(this.db, (tx) => writeAudit(tx, {
+      actor: r.caller?.actor ?? 'anonymous', role: r.caller?.role ?? 'invalid', tool: 'http', outcome: 'denied', startedAt,
+      correlationId: randomUUID(), errorCode: r.errorCode, args: { ip: r.ip, status: r.status, method: r.method },
+    })).catch((e) => {
       this.countDropped(r.ip, 1);
       throw e;
-    }
+    });
+    const settled = write.then(() => {}, () => {}).finally(() => { this.writing.delete(settled); });
+    this.writing.add(settled);
+    await write;
     return true;
   }
 
@@ -153,9 +155,16 @@ export class RejectionAuditor {
     return total;
   }
 
-  async close() {
+  /**
+   * Stops the periodic flush and writes the final summary. It first waits (up to waitMs) for refusal rows still
+   * being written, so one that fails is counted in this summary rather than after it.
+   */
+  async close(waitMs = 2_000) {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([Promise.allSettled([...this.writing]), new Promise<void>((r) => { timer = setTimeout(r, waitMs); })]);
+    clearTimeout(timer);
     await this.flush();
   }
 }
