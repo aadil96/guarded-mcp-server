@@ -27,6 +27,10 @@ Each rule lists the files that enforce it, as backticked repo paths. `pnpm check
 | A write needs an approval, one idempotency key gives one approval, and an approval executes once. | `test/threats/t1-t3.test.ts`, `test/approval-state.test.ts` |
 | Money is bigint-backed `Paise` and ids are branded, with one refundable calculation. | `src/domain/brands.ts`, `test/types/brands-types.ts`, `test/refundable.test.ts` |
 | `tools/list` is pinned: any change fails until the snapshot is regenerated with `pnpm tools:snapshot` and reviewed. | `test/snapshots/tools-list.json`, `test/tools-list-snapshot.test.ts` |
+| HTTP bearer tokens are stored only as SHA-256 hashes, and the HTTP server refuses to start with no tokens or a malformed token config. | `test/tokens.test.ts`, `test/startup-guards.test.ts` |
+| Over HTTP every token sees the stdio `tools/list`; scope is checked only on `tools/call`, the caller comes from the token, and no scope grants admin. | `test/http.test.ts` |
+| HTTP requests with a `Host` or `Origin` outside the allowlist, or a body over 1 MiB, are refused before parsing. | `test/http.test.ts` |
+| Audit rows for HTTP refusals are bounded per IP, with dropped refusals counted in a summary row. | `test/http.test.ts` |
 | CI runs the exact Node in `.nvmrc`, which sits inside `engines.node`; locally any Node in that range works. | `scripts/check-engines.mjs`, `test/check-engines.test.ts` |
 | Real-Postgres suites never skip in CI. | `test/startup-guards.test.ts` |
 | This table points only at enforcers that exist and run. | `scripts/check-agents-md-enforcers.mjs`, `test/check-agents-md.test.ts` |

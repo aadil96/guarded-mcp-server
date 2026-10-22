@@ -8,6 +8,7 @@ export const issueRefundTool = defineWriteTool({
     'and returns status pending_approval with an approvalId and a summary of the refund. Pass a unique idempotency_key ' +
     'and reuse the same key with the same arguments when retrying; reusing a key with different arguments is a conflict.',
   input: issueRefundSchema,
+  scope: 'refund:request',
   summarize: (db, args) => issueRefund.summarize(db, args),
   execute: (tx, _args, approval) => issueRefund.execute(tx, approval),
 });

@@ -1,0 +1,203 @@
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { finished } from 'node:stream/promises';
+import {
+  localhostAllowedHostnames, localhostAllowedOrigins, validateHostHeader, validateOriginHeader, WebStandardStreamableHTTPServerTransport,
+} from '@modelcontextprotocol/server';
+import { AuditTracker, auditingTransport } from '../audit/transport.js';
+import { authenticate, type TokenEntry } from '../auth/tokens.js';
+import type { AppDb } from '../db/types.js';
+import { createServer } from '../server.js';
+import { type Rejection, RejectionAuditor, type RejectionLimits } from './rejections.js';
+
+export const MCP_PATH = '/mcp';
+export const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
+export const DEFAULT_AUDIT_WAIT_MS = 1_000;
+const PORT = String.raw`(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|[1-9]\d{0,3}|0))?`;
+const HOSTNAME = String.raw`(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])`;
+/**
+ * Host is a bare host or bracketed IPv6 literal with an optional port; Origin is scheme://host[:port]. The SDK's
+ * validators compare only the parsed hostname, so userinfo, paths, queries and fragments are refused here first.
+ */
+const HOST_SYNTAX = new RegExp(`^${HOSTNAME}${PORT}$`);
+const ORIGIN_SYNTAX = new RegExp(`^[A-Za-z][A-Za-z0-9+.-]*://${HOSTNAME}${PORT}$`);
+
+export type HttpOptions = {
+  db: AppDb;
+  tokens: readonly TokenEntry[];
+  host?: string;
+  port?: number;
+  /** Extra Host names allowed besides localhost, 127.0.0.1 and [::1] (hostnames only, no port). */
+  allowedHosts?: readonly string[];
+  /** Extra browser Origin hostnames allowed besides the localhost ones. Requests with no Origin pass. */
+  allowedOrigins?: readonly string[];
+  maxBodyBytes?: number;
+  rejectionLimits?: RejectionLimits;
+  /** How long a refusal waits for its audit row before the response is sent anyway. */
+  auditWaitMs?: number;
+  /** How long close() waits for in-flight requests before cutting their connections. */
+  shutdownGraceMs?: number;
+  /** For tests: the clock the per-IP rejection limit uses. */
+  now?: () => number;
+};
+
+class TooLarge extends Error {}
+
+async function readBody(req: IncomingMessage, max: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > max) throw new TooLarge();
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
+  if (res.headersSent) return;
+  res.writeHead(status, { 'content-type': 'application/json', ...headers });
+  res.end(JSON.stringify(body));
+}
+
+async function sendResponse(res: ServerResponse, r: Response) {
+  const headers: Record<string, string> = {};
+  r.headers.forEach((v, k) => { headers[k] = v; });
+  res.writeHead(r.status, headers);
+  res.end(Buffer.from(await r.arrayBuffer()));
+}
+
+/** Runs a close step but gives up after ms: pool.end() waits for every checked-out client, and a stuck query never returns one. */
+export async function closeWithin(close: () => Promise<void>, ms: number): Promise<'closed' | 'timed_out' | 'failed'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      close().then(() => 'closed' as const, () => 'failed' as const),
+      new Promise<'timed_out'>((r) => { timer = setTimeout(() => r('timed_out'), ms); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Streamable HTTP entry. Every request is checked in this order, each failure answered before anything is
+ * parsed: path, declared body size (413), Host and Origin (DNS rebinding, 403), bearer token (401), then the
+ * body is read with the same cap. The caller (actor, role, scopes) comes from the token only. Each request is
+ * served statelessly by a fresh server from createServer, the same factory stdio uses, so tools/list matches.
+ */
+export function startHttpServer(opts: HttpOptions) {
+  const maxBody = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const hosts = [...localhostAllowedHostnames(), ...(opts.allowedHosts ?? [])];
+  const origins = [...localhostAllowedOrigins(), ...(opts.allowedOrigins ?? [])];
+  const rejections = new RejectionAuditor(opts.db, opts.rejectionLimits, opts.now);
+  rejections.startPeriodicFlush();
+
+  // The audit row is normally written before the refusal is sent, but a slow database can't hold the response:
+  // after auditWaitMs it is sent anyway, and the write carries on (a failure is counted in the dropped summary).
+  const reject = async (res: ServerResponse, r: Rejection, body: unknown, headers?: Record<string, string>) => {
+    const write = rejections.record(r).catch((e) => { console.error('rejection audit failed:', (e as Error).message); });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([write, new Promise<void>((done) => { timer = setTimeout(done, opts.auditWaitMs ?? DEFAULT_AUDIT_WAIT_MS); })]);
+    clearTimeout(timer);
+    sendJson(res, r.status, body, headers);
+  };
+
+  async function handle(req: IncomingMessage, res: ServerResponse) {
+    const ip = req.socket.remoteAddress ?? 'unknown';
+    const method = req.method ?? 'GET';
+    // Only the origin-form target /mcp (optionally with a query) is served; anything else, including absolute-form
+    // or unparseable targets, is a 404 decided without URL parsing, so no target can throw before the guards.
+    if ((req.url ?? '').split('?')[0] !== MCP_PATH) return sendJson(res, 404, { error: 'not_found' });
+    const declared = Number(req.headers['content-length'] ?? 0);
+    if (declared > maxBody) {
+      res.setHeader('connection', 'close');
+      return reject(res, { ip, method, status: 413, errorCode: 'body_too_large' }, { error: 'body_too_large', maxBytes: maxBody });
+    }
+    if (!HOST_SYNTAX.test(req.headers.host ?? '') || !validateHostHeader(req.headers.host, hosts).ok) {
+      return reject(res, { ip, method, status: 403, errorCode: 'invalid_host' }, { error: 'invalid_host' });
+    }
+    const origin = req.headers.origin;
+    if ((origin !== undefined && !ORIGIN_SYNTAX.test(origin)) || !validateOriginHeader(origin, origins).ok) {
+      return reject(res, { ip, method, status: 403, errorCode: 'forbidden_origin' }, { error: 'forbidden_origin' });
+    }
+    const auth = authenticate(req.headers.authorization, opts.tokens);
+    if (!auth.ok) {
+      const challenge = auth.reason === 'missing_token'
+        ? 'Bearer realm="guarded-mcp-server"'
+        : 'Bearer realm="guarded-mcp-server", error="invalid_token", error_description="The access token is invalid"';
+      return reject(res, { ip, method, status: 401, errorCode: auth.reason }, { error: auth.reason }, { 'www-authenticate': challenge });
+    }
+    const { caller } = auth;
+    // Stateless: no GET stream and no DELETE. The SDK client probes GET after initialize and expects this 405, so it is not audited.
+    if (method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' }, { allow: 'POST' });
+    let body: Buffer;
+    try {
+      body = await readBody(req, maxBody);
+    } catch (e) {
+      if (!(e instanceof TooLarge)) throw e;
+      res.setHeader('connection', 'close');
+      return reject(res, { ip, method, status: 413, errorCode: 'body_too_large', caller }, { error: 'body_too_large', maxBytes: maxBody });
+    }
+
+    const headers = new Headers();
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (k === 'authorization' || k === 'host' || v === undefined) continue;
+      headers.set(k, Array.isArray(v) ? v.join(', ') : v);
+    }
+    const request = new Request(new URL(MCP_PATH, `http://${req.headers.host}`), { method, headers, body: new Uint8Array(body) });
+    const tracker = new AuditTracker();
+    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true, maxRequestBodySize: maxBody });
+    const server = createServer(opts.db, caller, tracker);
+    try {
+      await server.connect(auditingTransport(transport, opts.db, caller, tracker));
+      await sendResponse(res, await transport.handleRequest(request));
+    } finally {
+      await server.close().catch(() => {});
+    }
+  }
+
+  const active = new Set<Promise<unknown>>();
+  let closing = false;
+  const http = createHttpServer((req, res) => {
+    // A request that arrives once shutdown has begun (for example pipelined on a keep-alive socket) is refused
+    // without touching the database, which is about to close. It is not audited for the same reason.
+    const handled = closing
+      ? Promise.resolve(sendJson(res, 503, { error: 'shutting_down' }, { connection: 'close' }))
+      : handle(req, res).catch((e) => {
+        console.error('http request failed:', e instanceof Error ? e.message : 'unknown error');
+        sendJson(res, 500, { error: 'internal_error' });
+      });
+    const done = Promise.all([handled, finished(res).catch(() => {})]).finally(() => { active.delete(done); });
+    active.add(done);
+  });
+  http.requestTimeout = 30_000;
+  http.headersTimeout = 10_000;
+
+  return new Promise<{ url: URL; close: () => Promise<void>; rejections: RejectionAuditor }>((resolve, reject) => {
+    http.once('error', reject);
+    http.listen(opts.port ?? 0, opts.host ?? '127.0.0.1', () => {
+      const a = http.address() as AddressInfo;
+      const host = a.family === 'IPv6' ? `[${a.address}]` : a.address;
+      resolve({
+        url: new URL(`http://${host}:${a.port}${MCP_PATH}`),
+        rejections,
+        close: async () => {
+          closing = true;
+          const stopped = new Promise<void>((r) => { http.close(() => r()); });
+          http.closeIdleConnections();
+          let grace: ReturnType<typeof setTimeout> | undefined;
+          let expired = false;
+          const deadline = new Promise<void>((r) => { grace = setTimeout(() => { expired = true; r(); }, opts.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS); });
+          // Wait on the live set, not a snapshot: a request already in flight may be joined by one parsed later.
+          while (active.size > 0 && !expired) await Promise.race([Promise.allSettled([...active]), deadline]);
+          clearTimeout(grace);
+          http.closeAllConnections();
+          await stopped;
+          await rejections.close().catch((e) => { console.error('final rejection summary audit failed:', (e as Error).message); });
+        },
+      });
+    });
+  });
+}

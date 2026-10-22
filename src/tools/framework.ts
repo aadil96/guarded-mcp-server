@@ -6,6 +6,7 @@ import { assertNever } from '../approvals/state.js';
 import type { Approved, HandlerMap, HandlerOutcome, RequestWriteResult, ToolHandler, WriteTool } from '../approvals/types.js';
 import { type Caller, writeAudit } from '../audit/log.js';
 import type { AuditTracker } from '../audit/transport.js';
+import type { Scope } from '../auth/tokens.js';
 import { inAppTx } from '../db/index.js';
 import type { AppDb, AppQueryable, AppTx } from '../db/types.js';
 
@@ -23,7 +24,11 @@ export class ToolError extends Error {
   constructor(public code: string, message: string) { super(message); }
 }
 
-type Deps = { db: AppDb; caller: Caller; tracker: AuditTracker };
+/**
+ * scopes is set by token-authenticated transports (HTTP) and absent on stdio, whose caller comes from the
+ * environment of the process that started it. When set, a tool outside the scopes is refused before it runs.
+ */
+type Deps = { db: AppDb; caller: Caller & { scopes?: readonly Scope[] }; tracker: AuditTracker };
 const toolBrand: unique symbol = Symbol('tool');
 
 /** An MCP tool built by defineReadTool or defineWriteTool. Not constructible elsewhere. */
@@ -31,6 +36,8 @@ export type DefinedTool = {
   readonly [toolBrand]: true;
   readonly name: string;
   readonly kind: 'read' | 'write';
+  /** The token scope a tools/call needs on transports that authenticate with scopes. */
+  readonly requiredScope: Scope;
   readonly description: string;
   readonly inputSchema: ToolInput;
   readonly annotations: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
@@ -127,6 +134,7 @@ export function defineReadTool<S extends ToolInput>(spec: ReadToolSpec<S>): Defi
     [toolBrand]: true as const,
     name: spec.name,
     kind: 'read' as const,
+    requiredScope: 'read' as const,
     description: spec.description,
     inputSchema: spec.input,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -182,6 +190,8 @@ export type WriteToolSpec<S extends ToolInput> = {
   description: string;
   /** The tool's own arguments; the framework adds idempotency_key to the MCP input schema. */
   input: S;
+  /** The token scope that may request this write over a scoped transport. */
+  scope: Exclude<Scope, 'read'>;
   /** Human-readable summary shown to the approver and returned while pending. */
   summarize: (db: AppQueryable, args: z.output<S>) => Promise<string>;
   /** Runs after approval, inside the transaction that claims the approval. */
@@ -227,6 +237,7 @@ export function defineWriteTool<S extends ToolInput>(spec: WriteToolSpec<S>): De
     [toolBrand]: true as const,
     name: spec.name,
     kind: 'write' as const,
+    requiredScope: spec.scope,
     description: spec.description,
     inputSchema,
     approvalHandler: handler,
@@ -259,6 +270,16 @@ export function approvalHandlers(tools: readonly DefinedTool[]): HandlerMap {
   return map;
 }
 
+/** Every tool stays listed for every caller (one tools/list for all transports); calls outside the scopes stop here, audited once. */
+async function refuseScope({ db, caller }: Deps, tool: DefinedTool, raw: unknown): Promise<CallToolResult> {
+  const startedAt = performance.now();
+  const correlationId = randomUUID();
+  await inAppTx(db, (tx) => writeAudit(tx, {
+    actor: caller.actor, role: caller.role, tool: tool.name, args: raw, outcome: 'denied', startedAt, correlationId, errorCode: 'insufficient_scope',
+  }));
+  return text({ error: 'insufficient_scope', requiredScope: tool.requiredScope, correlationId }, true);
+}
+
 /** Registers tools on a server. The only registerTool call in the codebase. */
 export function registerTools(server: McpServer, deps: Deps, tools: readonly DefinedTool[]): void {
   const seen = new Set<string>();
@@ -271,6 +292,8 @@ export function registerTools(server: McpServer, deps: Deps, tools: readonly Def
     }, async (raw: unknown, ctx: ServerContext) => {
       // The handler audits from here on; the transport hook only audits calls the SDK rejected first.
       deps.tracker.markHandled(ctx.mcpReq.id);
+      const { scopes } = deps.caller;
+      if (scopes !== undefined && !scopes.includes(tool.requiredScope)) return refuseScope(deps, tool, raw);
       return tool.call(deps, raw);
     });
   }
