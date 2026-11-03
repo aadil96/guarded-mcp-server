@@ -90,7 +90,7 @@ describe('approvals console', () => {
 
   it('rejected tokens are never stored: the audit row keeps only the command, a valid id and an argument count', async () => {
     const id = await pending();
-    const secret = 'sk-live-SECRET-9931';
+    const secret = 'fake-token-not-a-secret';
     for (const argv of [['approve', id, '--token', secret], [secret], ['approve', secret]]) {
       await cli(argv, admin);
       const a = await one<{ arguments: unknown }>('select arguments from audit_events order by created_at desc, id desc limit 1');
