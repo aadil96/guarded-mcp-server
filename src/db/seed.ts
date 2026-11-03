@@ -64,7 +64,8 @@ export function buildSeed() {
     const gstin = `${state}AAMRD${String(1000 + n * 37).padStart(4, '0')}Z${(n % 9) + 1}Z${String.fromCharCode(65 + n)}`;
     return {
       id: seedId(`customer:${n}`), name, city, gstin,
-      phone: `+91 90000 ${String(10000 + n * 101).slice(-5)}`,
+      // Deliberately invalid: an Indian national number can't start with 0, so this can't reach a real person.
+      phone: `+91 00000 ${String(10000 + n * 101).slice(-5)}`,
       email: `accounts${n}@example.invalid`,
       createdAt: at(-60 + n),
     };

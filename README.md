@@ -4,9 +4,19 @@ An MCP server for a **fake** wholesale business database (Meridian Supply Co.). 
 
 > **Warning:** this is a demo. All data is synthetic. Don't point it at a real database or real customer data.
 
-## Status
+## Design
 
-Work in progress. The tools run over stdio (`pnpm start`) or Streamable HTTP (`MCP_TRANSPORT=http pnpm start`, below). `issue_refund` only creates a pending approval; a human approves, denies and executes it with the approvals console:
+- **Approval state machine.** Every write request becomes an `approvals` row that moves only `pending -> approved | denied` and `approved -> executed | failed`. The typed transitions in `src/approvals/state.ts` mirror the `approvals_guard` trigger, so the database also rejects any other move, a delete, or a change to the request's frozen fields.
+- **Human-approved, idempotent refunds.** `issue_refund` never refunds anything by itself. It needs an idempotency key, which is unique per tool. A retry with the same key and arguments returns the same approval, and the same key with different arguments is refused as a conflict. Only a human using the approvals console can approve and execute it, and the requester can't approve their own request.
+- **Append-only audit log.** Every tool call, approval decision and refusal writes one `audit_events` row. Triggers reject `UPDATE`, `DELETE` and `TRUNCATE` on that table for every role, the owner included.
+- **Least-privilege database role.** The server's connections run as `meridian_app`, which has only the grants it needs: read access to the business tables, inserts on a few, column-level updates (order and invoice status, approval resolution fields) and `INSERT`/`SELECT` on the audit log. If the role can't be set, the server exits.
+- **Hashed, scoped bearer tokens.** Over HTTP the server stores only SHA-256 hashes of tokens, compares them in constant time, and maps scopes to roles. No token can reach `admin`.
+- **Money in paise.** Amounts are integer paise in `bigint` columns, with check constraints (for example, a line total must equal quantity × unit price).
+- **Tests on real Postgres.** With `DATABASE_URL` set (as in CI, on Postgres 16), the tests run against a fresh database per test file, including the trigger, grant and fail-closed tests.
+
+## Running
+
+The tools run over stdio (`pnpm start`) or Streamable HTTP (`MCP_TRANSPORT=http pnpm start`, below). `issue_refund` only creates a pending approval; a human approves, denies and executes it with the approvals console:
 
 ```sh
 APPROVER_ACTOR=alice APPROVER_ROLE=admin pnpm approvals list
